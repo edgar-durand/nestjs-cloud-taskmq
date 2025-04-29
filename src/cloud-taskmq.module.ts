@@ -1,6 +1,6 @@
 import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
-import { DiscoveryModule } from '@nestjs/core';
-import { MongooseModule } from '@nestjs/mongoose';
+import { DiscoveryModule, DiscoveryService, MetadataScanner, ModuleRef } from '@nestjs/core';
+import { MongooseModule, getModelToken } from '@nestjs/mongoose';
 import { ProducerService } from './services/producer.service';
 import { ConsumerService } from './services/consumer.service';
 import { TaskController } from './controllers/task.controller';
@@ -16,7 +16,9 @@ import {
 import { createStorageAdapterProvider } from './utils/storage-adapter.factory';
 import { MongoStorageAdapter } from './adapters/mongo-storage.adapter';
 import { RedisStorageAdapter } from './adapters/redis-storage.adapter';
+import { MemoryStorageAdapter } from './adapters/memory-storage.adapter';
 import { TaskSchema } from './adapters/mongo-storage.adapter';
+import { IStateStorageAdapter } from './interfaces/storage-adapter.interface';
 
 /**
  * Main module for CloudTaskMQ. Use forRoot or forRootAsync to configure and register.
@@ -127,73 +129,131 @@ export class CloudTaskMQModule {
    * ```
    */
   static forRootAsync(asyncConfig: CloudTaskMQAsyncConfig): DynamicModule {
-    // Create config provider
-    const configProvider = this.createAsyncConfigProvider(asyncConfig);
-
-    // Setup initial imports
-    const imports: any[] = [DiscoveryModule, ...(asyncConfig.imports || [])];
-
-    // Create custom storage adapter provider
-    const storageAdapterProvider: Provider = {
-      provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-      useFactory: async (config: CloudTaskMQConfig) => {
-        const { storageAdapter, storageOptions } = config;
-        
-        switch (storageAdapter) {
-          case 'mongo':
-            return new MongoStorageAdapter(
-              undefined, // connection will be injected by NestJS
-              undefined  // model will be injected by NestJS
+    // Create config provider first - this needs to be available before any dynamic imports
+    const configProvider: Provider = this.createAsyncConfigProvider(asyncConfig);
+    
+    // Create custom providers array
+    const providers = [
+      configProvider,
+      {
+        provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
+        useFactory: (config: CloudTaskMQConfig) => {
+          const { storageAdapter, storageOptions } = config;
+          
+          switch (storageAdapter) {
+            case 'mongo':
+              return new MongoStorageAdapter(
+                undefined, // connection will be injected by NestJS
+                undefined  // model will be injected by NestJS
             );
-          case 'redis':
-            return new RedisStorageAdapter({
-              host: storageOptions.redis?.host,
-              port: storageOptions.redis?.port,
-              password: storageOptions.redis?.password,
-              url: storageOptions.redis?.url,
-              keyPrefix: storageOptions.redis?.keyPrefix,
-            });
-          default:
-            throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
+            case 'redis':
+              return new RedisStorageAdapter({
+                host: storageOptions.redis?.host,
+                port: storageOptions.redis?.port,
+                password: storageOptions.redis?.password,
+                url: storageOptions.redis?.url,
+                keyPrefix: storageOptions.redis?.keyPrefix,
+              });
+            case 'memory':
+              return new MemoryStorageAdapter();
+            default:
+              throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
+          }
+        },
+        inject: [CLOUD_TASKMQ_CONFIG],
+      },
+      // Properly configure ProducerService with injection
+      {
+        provide: ProducerService,
+        useFactory: (config: CloudTaskMQConfig, storageAdapter: IStateStorageAdapter) => {
+          return new ProducerService(config, storageAdapter);
+        },
+        inject: [CLOUD_TASKMQ_CONFIG, CLOUD_TASKMQ_STORAGE_ADAPTER],
+      },
+      // Properly configure ConsumerService with injection
+      {
+        provide: ConsumerService,
+        useFactory: (
+          discoveryService: DiscoveryService,
+          metadataScanner: MetadataScanner,
+          moduleRef: ModuleRef,
+          config: CloudTaskMQConfig,
+          storageAdapter: IStateStorageAdapter
+        ) => {
+          return new ConsumerService(
+            discoveryService,
+            metadataScanner,
+            moduleRef,
+            config,
+            storageAdapter
+          );
+        },
+        inject: [
+          DiscoveryService,
+          MetadataScanner,
+          ModuleRef,
+          CLOUD_TASKMQ_CONFIG,
+          CLOUD_TASKMQ_STORAGE_ADAPTER
+        ],
+      }
+    ];
+
+    // Setup base imports - every configuration needs DiscoveryModule
+    const imports = [DiscoveryModule, ...(asyncConfig.imports || [])];
+    
+    // Create a special MongoDB configuration factory
+    const mongoConfigFactory = {
+      provide: 'MONGODB_OPTIONS_FACTORY',
+      useFactory: (config: CloudTaskMQConfig) => {
+        if (config.storageAdapter === 'mongo') {
+          return {
+            uri: config.storageOptions.mongoUri,
+            collectionName: config.storageOptions.collectionName || 'cloud_taskmq_tasks'
+          };
         }
+        return null;
       },
       inject: [CLOUD_TASKMQ_CONFIG],
     };
-
-    // Create providers array
-    const providers = [
-      configProvider,
-      storageAdapterProvider,
-      ProducerService,
-      ConsumerService,
-    ];
-
-    // Return the dynamic module
+    
+    // Add MongoDB factory to providers
+    providers.push(mongoConfigFactory);
+    
+    // Setup MongoDB modules for mongo adapter type only
+    providers.push({
+      provide: 'MONGODB_CONNECTION_FACTORY',
+      useFactory: (config: CloudTaskMQConfig, mongoOptions: any) => {
+        if (config.storageAdapter === 'mongo' && mongoOptions) {
+          // Create and inject a custom provider for the mongo storage adapter
+          providers.push({
+            provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
+            useFactory: (model: any) => {
+              return new MongoStorageAdapter(null, model);
+            },
+            inject: [getModelToken('CloudTaskMQTask')],
+          });
+          
+          // Add MongoDB modules to imports
+          imports.push(
+            MongooseModule.forRoot(mongoOptions.uri),
+            MongooseModule.forFeature([
+              { 
+                name: 'CloudTaskMQTask', 
+                schema: TaskSchema,
+                collection: mongoOptions.collectionName 
+              }
+            ])
+          );
+        }
+        return true;
+      },
+      inject: [CLOUD_TASKMQ_CONFIG, 'MONGODB_OPTIONS_FACTORY'],
+    });
+    
     return {
       module: CloudTaskMQModule,
       global: true,
-      imports: [
-        ...imports,
-        // This factory approach solves the circular dependency issue
-        MongooseModule.forRootAsync({
-          useFactory: async () => ({
-            uri: 'mongodb://dummy-uri', // This will be overridden by the connection factory
-          }),
-        }),
-        MongooseModule.forFeatureAsync([
-          {
-            name: 'CloudTaskMQTask',
-            useFactory: (config: CloudTaskMQConfig) => {
-              const collectionName = config.storageOptions.collectionName || 'cloud_taskmq_tasks';
-              return {
-                schema: TaskSchema,
-                collection: collectionName,
-              };
-            },
-            inject: [CLOUD_TASKMQ_CONFIG],
-          },
-        ]),
-      ],
+      imports,
       controllers: [TaskController],
       providers,
       exports: [ProducerService, ConsumerService],

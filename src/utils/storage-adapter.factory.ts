@@ -4,6 +4,7 @@ import { CloudTaskMQConfig } from '../interfaces/config.interface';
 import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
 import { MongoStorageAdapter } from '../adapters/mongo-storage.adapter';
 import { RedisStorageAdapter } from '../adapters/redis-storage.adapter';
+import { MemoryStorageAdapter } from '../adapters/memory-storage.adapter';
 import { getModelToken, getConnectionToken } from '@nestjs/mongoose';
 
 /**
@@ -30,14 +31,16 @@ export function createStorageAdapterProvider(config: CloudTaskMQConfig): Provide
             url: storageOptions.redis?.url,
             keyPrefix: storageOptions.redis?.keyPrefix,
           });
+        case 'memory':
+          return new MemoryStorageAdapter();
         default:
           throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
       }
     },
     inject: [
       CLOUD_TASKMQ_CONFIG,
-      getConnectionToken(),
-      getModelToken('CloudTaskMQTask')
+      { token: getConnectionToken(), optional: true },
+      { token: getModelToken('CloudTaskMQTask'), optional: true }
     ],
   };
 }
