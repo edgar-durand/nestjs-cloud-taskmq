@@ -1,0 +1,175 @@
+Product Requirements Document: NestJS Cloud Tasks + MongoDB Queue Library ("CloudTaskMQ")
+1. Introduction
+
+This document outlines the requirements for a new NestJS library, tentatively named "CloudTaskMQ". The goal is to provide a robust task queue system leveraging Google Cloud Tasks for task scheduling and delivery, and MongoDB for persistent state tracking and observability. It aims to offer a developer experience similar to popular libraries like BullMQ, particularly regarding event-driven processing and task lifecycle monitoring, but built on a Google Cloud Platform (GCP) and MongoDB stack.
+
+2. Goals
+
+Provide a BullMQ-like interface: Offer familiar patterns (decorators, lifecycle events) for developers transitioning from or familiar with BullMQ.
+Leverage Cloud Tasks: Utilize Google Cloud Tasks for its robust, scalable, and managed task scheduling, delivery, and retry capabilities.
+Persistent State Tracking: Use MongoDB to store and track the state of each task throughout its lifecycle (idle, active, completed, failed).
+Decoupled Producer/Consumer: Enable clear separation between services that enqueue tasks (Producers) and services that process them (Consumers).
+Observability: Provide mechanisms to easily monitor queue health and individual task statuses.
+NestJS Integration: Build as a standard NestJS library, integrating seamlessly with the NestJS module system and dependency injection.
+Publishable Module: Design the library to be independently buildable and publishable to private (Artifactory) or public (NPM) registries.
+High Quality & Maintainability: Adhere to best practices, clean code principles, and relevant design patterns. Ensure thorough documentation.
+3. Non-Goals
+
+Replacing Cloud Tasks Features: This library does not aim to replace core Cloud Tasks functionality like scheduling, retries, or rate limiting. It complements Cloud Tasks by adding a state management and observability layer.
+Real-time Job Progress: While task status (active, completed, etc.) is tracked, detailed real-time progress updates within a single task execution are out of scope for the initial version.
+Complex Job Dependencies: Advanced workflow orchestration (e.g., complex DAGs of jobs) is not a primary goal for V1.
+Cross-Cloud Provider Support: The initial version will focus exclusively on Google Cloud Tasks.
+4. Target Audience
+
+Developers using the NestJS framework within a GCP environment.
+Teams needing a reliable background task processing system.
+Users who require persistent tracking and observability of task states.
+Developers familiar with BullMQ patterns looking for a GCP-native alternative.
+5. Key Features
+
+5.1. Queue Definition & Registration:
+Ability to define and register specific Google Cloud Task queues that the application will interact with.
+Configuration likely managed through a NestJS module (CloudTaskMQModule.forRoot(...)).
+5.2. Task Producer Service:
+A service/API for easily creating and enqueuing tasks onto registered Cloud Task queues.
+Automatically creates a corresponding task record in MongoDB with an initial 'idle' or 'queued' state.
+Handles necessary Cloud Tasks API interactions (e.g., createTask).
+5.3. Task Consumer & Processing:
+Mechanism to define task handlers within the NestJS application. Cloud Tasks will push tasks to a specific HTTP endpoint exposed by the application.
+The library should provide infrastructure (e.g., a dedicated controller or interceptor) to receive these HTTP requests from Cloud Tasks.
+Task Locking: Upon receiving a task push from Cloud Tasks, the library automatically updates the task's state in MongoDB to 'active' and implements a lock (e.g., sets an activeAt timestamp, potentially a workerId). This prevents concurrent processing if Cloud Tasks were to deliver the same task instance multiple times (though Cloud Tasks aims for at-least-once delivery).
+Invokes the appropriate user-defined task handler logic.
+5.4. Lifecycle Event Emitters & Decorators:
+Provide decorators (e.g., @Processor(queueName), @OnQueueActive(), @OnQueueCompleted(), @OnQueueFailed(), @OnQueueProgress() (optional)) similar to BullMQ.
+@Processor(queueName): Decorator to designate a class or method as the handler for tasks from a specific queue. The library routes incoming Cloud Tasks pushes to the correct processor.
+Lifecycle Decorators (@OnQueueActive, etc.): Methods decorated with these will be called automatically by the library when a task handled by the associated @Processor reaches the corresponding state.
+State updates in MongoDB trigger these event handlers.
+5.5. State Management:
+The library automatically manages task state transitions in the MongoDB tracking collection:
+Producer creates task -> idle/queued
+Consumer receives task -> active
+Handler completes successfully -> completed
+Handler throws error -> failed (Cloud Tasks handles retries based on queue config; the library tracks the latest attempt's failure).
+Stores relevant metadata: task ID (from Cloud Tasks), payload, creation time, completion time, error messages, retry count (if obtainable from Cloud Tasks request).
+5.6. Task Tracking/Observability Tools:
+Provide a service or API within the library to query the MongoDB collection for task statuses (e.g., get counts by status, fetch failed tasks, find a specific task by ID).
+(Optional V2) Consider a simple UI module for visualizing queue states.
+5.7. Documentation:
+Comprehensive documentation covering setup, configuration, producer usage, consumer implementation, decorators, and observability features.
+Use TSDoc comments for all public APIs within the codebase.
+6. Technical Requirements
+
+Platform: Node.js
+Framework: NestJS (^9.0.0 or later recommended)
+Language: TypeScript
+Key Dependencies:
+@google-cloud/tasks: Google Cloud Tasks client library.
+mongoose (or another MongoDB ODM/driver): For interaction with MongoDB.
+@nestjs/common, @nestjs/core, @nestjs/config
+Database: MongoDB
+Infrastructure: Google Cloud Tasks API enabled in a GCP project.
+7. Design Considerations
+
+Modularity: Design as a standard NestJS module (CloudTaskMQModule). Use forRoot/forRootAsync for configuration (GCP credentials, MongoDB connection, queue definitions).
+Producer API: Simple, injectable service (ProducerService) with methods like addTask(queueName: string, payload: any, options?: CloudTaskOptions).
+Consumer Endpoint: The library should likely provide a base controller or instructions on setting up an endpoint to receive HTTP pushes from Cloud Tasks. Security (e.g., validating requests from Cloud Tasks) is crucial.
+Decorator Implementation: Leverage NestJS reflection and metadata storage to link decorators to specific methods and events.
+MongoDB Schema: Design a flexible schema for the task tracking collection (e.g., taskId, queueName, status, payload, createdAt, updatedAt, startedAt, completedAt, failedReason, retryCount, metadata). Ensure appropriate indexes (e.g., on taskId, status, queueName).
+Locking Strategy: Use atomic updates in MongoDB (e.g., findOneAndUpdate) to transition state to 'active' only if currently 'idle'. Include timestamps (lockedUntil, activeAt) to potentially detect and handle stalled jobs (though Cloud Tasks retries are the primary recovery mechanism).
+Error Handling: Define clear error handling for Cloud Tasks API interactions, MongoDB operations, and task execution failures. Failed task states should store relevant error information.
+Configuration: Allow configuration of MongoDB connection, default GCP project/location, and potentially queue-specific settings (if not solely relying on Cloud Tasks console).
+8. Success Metrics
+
+Adoption: Number of internal projects/teams using the library.
+Stability: Low rate of bugs or unexpected failures related to the library's core logic.
+Developer Satisfaction: Positive feedback regarding ease of use, documentation clarity, and feature set similarity to BullMQ patterns.
+Performance: Negligible overhead added to task processing time by the library's tracking mechanisms. Efficient MongoDB queries.
+9. Future Considerations
+
+Delayed Jobs: Explicit support for scheduling jobs in the future (leveraging Cloud Tasks scheduleTime).
+Progress Reporting: Allow tasks to report granular progress updates (@OnQueueProgress).
+Batched Task Creation: Optimize adding multiple tasks at once.
+Enhanced Observability UI: A dedicated UI module for monitoring queues.
+Cron Jobs: Integration for recurring jobs (possibly leveraging Cloud Scheduler triggering tasks).
+10. Open Questions
+
+How should GCP authentication be handled? Rely on application default credentials, or allow explicit key configuration? (Recommend ADC first).
+What level of detail is needed for the locking mechanism, given Cloud Tasks' own delivery guarantees and retry logic?
+How should the library handle Cloud Tasks authentication for the push endpoint (e.g., OIDC tokens)? The library should provide guidance or helpers.
+Should the MongoDB collection name and schema be configurable?
+This PRD provides a solid foundation. Let me know if you'd like to refine any specific sections or discuss the implementation details further.
+
+Added to Goals:
+
+Storage Agnosticism: Design the state management layer to be adaptable, allowing potential future replacement of MongoDB with other stores (like Redis) through a well-defined interface, minimizing impact on the core library and consuming applications.
+Modified Section 5. Key Features:
+
+5.3. Task Consumer & Processing:
+Mechanism to define task handlers within the NestJS application. Cloud Tasks will push tasks to a specific HTTP endpoint exposed by the application.
+Consumer Controller Decorator: Introduce a specific decorator (e.g., @CloudTaskConsumer()) to mark the NestJS controller and/or endpoint method designated to receive HTTP push requests from Cloud Tasks for specific queues. This simplifies setup and routing.
+The library utilizes this decorator to automatically configure routing and apply necessary middleware/guards for request validation (e.g., verifying Cloud Tasks OIDC tokens) and task processing initiation.
+Task Locking: Upon receiving and validating a task push via the decorated endpoint, the library interacts with the configured storage adapter to update the task's state to 'active' and implement a lock... (rest of the description remains similar).
+5.4. Lifecycle Event Emitters & Decorators:
+(Clarification added) State updates retrieved via the storage adapter trigger these event handlers.
+5.6. Task Tracking/Observability Tools:
+Provide a service or API within the library to query task statuses via the configured storage adapter... (rest remains similar).
+Modified Section 7. Design Considerations:
+
+Storage Adapter Pattern: Define a clear interface (e.g., IStateStorageAdapter) for all interactions related to task state persistence (create, update status, fetch by ID, query by status, locking). Implement a concrete MongoStateStorageAdapter initially. This interface will be the contract for any future storage implementations (e.g., RedisStateStorageAdapter). The core library logic will depend only on the interface, not the concrete implementation. Configuration in the CloudTaskMQModule will specify which adapter implementation to use and its connection details.
+Consumer Endpoint & Decorator: The @CloudTaskConsumer() decorator (applied at the class or method level of a NestJS controller) will register the endpoint with the library's core module. The library will handle the underlying routing and integration with the task processing logic and storage adapter. Security (validating requests from Cloud Tasks, e.g., using OIDC token verification) should be integrated into the handling associated with this decorator.
+(Modified) MongoDB Schema: Design a flexible schema for the MongoDB adapter... (rest remains similar). Other adapters would define their own storage structures (e.g., Redis keys/hashes).
+Modified Section 9. Future Considerations:
+
+Additional Storage Adapters: Develop and provide official adapters for other common storage solutions like Redis.
+Modified Section 10. Open Questions:
+
+What specific methods should the IStateStorageAdapter interface expose to cover all necessary state management and locking operations?
+These changes emphasize the abstraction layer for storage and formalize the mechanism for identifying the consumer endpoint, making the library more flexible and easier to configure.
+
+nestjs-cloud-taskmq/
+├── src/
+│   ├── adapters/        # Storage adapters
+│   ├── decorators/      # Decorators for events and controllers
+│   ├── interfaces/      # Interfaces and types
+│   ├── models/          # Task model and schemas
+│   ├── services/        # Core services
+│   ├── utils/           # Utility functions
+│   ├── cloud-taskmq.module.ts
+│   └── index.ts         # Main exports
+├── package.json
+├── tsconfig.json
+├── jest.config.js
+└── README.md
+--------
+What's Included
+I've created a complete NestJS library with the following components:
+
+Core Services:
+ProducerService for adding tasks to queues
+ConsumerService for processing incoming tasks
+Storage Adapters:
+MongoDB adapter
+Redis adapter
+Interface for custom adapters (storage agnostic)
+Decorators:
+@Processor() - Marks a class as a task processor
+@Process() - Marks a method as a task handler
+@OnQueueActive/Completed/Failed/Progress() - Event handlers
+@CloudTaskConsumer() - Marks a controller to receive Cloud Tasks requests
+Module Configuration:
+Static configuration via CloudTaskMQModule.forRoot()
+Async configuration via CloudTaskMQModule.forRootAsync()
+Documentation:
+Comprehensive README with setup instructions
+Example files showing:
+Producer usage
+Consumer implementation
+Module configuration
+Custom storage adapter creation
+The library is ready to use and adheres to all requirements from the PRD:
+
+Cloud Tasks integration for task scheduling
+Storage agnostic (MongoDB, Redis, or custom adapters)
+Event-driven programming with BullMQ-like decorators
+Task lifecycle tracking (idle, active, completed, failed)
+Clean architecture following NestJS patterns
