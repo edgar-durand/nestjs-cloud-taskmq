@@ -1,17 +1,17 @@
 import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
 import { DiscoveryModule, DiscoveryService, MetadataScanner, ModuleRef } from '@nestjs/core';
-import { MongooseModule, getModelToken } from '@nestjs/mongoose';
+import {MongooseModule, getModelToken, getConnectionToken} from '@nestjs/mongoose';
 import { ProducerService } from './services/producer.service';
 import { ConsumerService } from './services/consumer.service';
 import { TaskController } from './controllers/task.controller';
-import { 
-  CloudTaskMQAsyncConfig, 
-  CloudTaskMQConfig, 
-  CloudTaskMQConfigFactory 
+import {
+  CloudTaskMQAsyncConfig,
+  CloudTaskMQConfig,
+  CloudTaskMQConfigFactory
 } from './interfaces/config.interface';
-import { 
-  CLOUD_TASKMQ_CONFIG, 
-  CLOUD_TASKMQ_STORAGE_ADAPTER 
+import {
+  CLOUD_TASKMQ_CONFIG,
+  CLOUD_TASKMQ_STORAGE_ADAPTER
 } from './utils/constants';
 import { createStorageAdapterProvider } from './utils/storage-adapter.factory';
 import { MongoStorageAdapter } from './adapters/mongo-storage.adapter';
@@ -19,6 +19,8 @@ import { RedisStorageAdapter } from './adapters/redis-storage.adapter';
 import { MemoryStorageAdapter } from './adapters/memory-storage.adapter';
 import { TaskSchema } from './adapters/mongo-storage.adapter';
 import { IStateStorageAdapter } from './interfaces/storage-adapter.interface';
+import {Connection, Model} from "mongoose";
+import {ITask} from "./interfaces/task.interface";
 
 /**
  * Main module for CloudTaskMQ. Use forRoot or forRootAsync to configure and register.
@@ -28,10 +30,10 @@ import { IStateStorageAdapter } from './interfaces/storage-adapter.interface';
 export class CloudTaskMQModule {
   /**
    * Register the CloudTaskMQ module with static configuration
-   * 
+   *
    * @param config Configuration for the CloudTaskMQ module
    * @returns Dynamic module
-   * 
+   *
    * @example
    * ```typescript
    * @Module({
@@ -94,10 +96,10 @@ export class CloudTaskMQModule {
 
   /**
    * Register the CloudTaskMQ module with async configuration
-   * 
+   *
    * @param config Async configuration options
    * @returns Dynamic module
-   * 
+   *
    * @example
    * ```typescript
    * @Module({
@@ -131,20 +133,21 @@ export class CloudTaskMQModule {
   static forRootAsync(asyncConfig: CloudTaskMQAsyncConfig): DynamicModule {
     // Create config provider first - this needs to be available before any dynamic imports
     const configProvider: Provider = this.createAsyncConfigProvider(asyncConfig);
-    
+
     // Create custom providers array
     const providers = [
       configProvider,
       {
         provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-        useFactory: (config: CloudTaskMQConfig) => {
+        useFactory: (config: CloudTaskMQConfig, connection: Connection, model: Model<ITask>) => {
           const { storageAdapter, storageOptions } = config;
-          
+
           switch (storageAdapter) {
             case 'mongo':
               return new MongoStorageAdapter(
-                undefined, // connection will be injected by NestJS
-                undefined  // model will be injected by NestJS
+                connection, // connection will be injected by NestJS
+                model,  // model will be injected by NestJS
+                storageOptions.collectionName
             );
             case 'redis':
               return new RedisStorageAdapter({
@@ -160,7 +163,11 @@ export class CloudTaskMQModule {
               throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
           }
         },
-        inject: [CLOUD_TASKMQ_CONFIG],
+        inject: [
+            CLOUD_TASKMQ_CONFIG,
+            { token: getConnectionToken(), optional: true },
+            { token: getModelToken('CloudTaskMQTask'), optional: true }
+        ],
       },
       // Properly configure ProducerService with injection
       {
@@ -200,7 +207,7 @@ export class CloudTaskMQModule {
 
     // Setup base imports - every configuration needs DiscoveryModule
     const imports = [DiscoveryModule, ...(asyncConfig.imports || [])];
-    
+
     // Create a special MongoDB configuration factory
     const mongoConfigFactory = {
       provide: 'MONGODB_OPTIONS_FACTORY',
@@ -215,10 +222,10 @@ export class CloudTaskMQModule {
       },
       inject: [CLOUD_TASKMQ_CONFIG],
     };
-    
+
     // Add MongoDB factory to providers
     providers.push(mongoConfigFactory);
-    
+
     // Setup MongoDB modules for mongo adapter type only
     providers.push({
       provide: 'MONGODB_CONNECTION_FACTORY',
@@ -227,20 +234,26 @@ export class CloudTaskMQModule {
           // Create and inject a custom provider for the mongo storage adapter
           providers.push({
             provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-            useFactory: (model: any) => {
-              return new MongoStorageAdapter(null, model);
+            useFactory: async (connection, model: any) => {
+              const adapter = new MongoStorageAdapter(connection, model, mongoOptions.collectionName);
+              // Explicitly call initialize to ensure the adapter is ready
+              await adapter.initialize();
+              return adapter;
             },
-            inject: [getModelToken('CloudTaskMQTask')],
+            inject: [
+                { token: getConnectionToken(), optional: true },
+                { token: getModelToken('CloudTaskMQTask'), optional: true }
+            ],
           });
-          
+
           // Add MongoDB modules to imports
           imports.push(
             MongooseModule.forRoot(mongoOptions.uri),
             MongooseModule.forFeature([
-              { 
-                name: 'CloudTaskMQTask', 
+              {
+                name: 'CloudTaskMQTask',
                 schema: TaskSchema,
-                collection: mongoOptions.collectionName 
+                collection: mongoOptions.collectionName
               }
             ])
           );
@@ -249,7 +262,7 @@ export class CloudTaskMQModule {
       },
       inject: [CLOUD_TASKMQ_CONFIG, 'MONGODB_OPTIONS_FACTORY'],
     });
-    
+
     return {
       module: CloudTaskMQModule,
       global: true,

@@ -16,26 +16,45 @@ import { getModelToken, getConnectionToken } from '@nestjs/mongoose';
 export function createStorageAdapterProvider(config: CloudTaskMQConfig): Provider {
   return {
     provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-    useFactory: (config: CloudTaskMQConfig, connection: any, taskModel: any): IStateStorageAdapter => {
+    useFactory: async (config: CloudTaskMQConfig, connection: any, taskModel: any): Promise<IStateStorageAdapter> => {
       const { storageAdapter, storageOptions } = config;
-      
+      let adapter: IStateStorageAdapter;
+
       // Create the appropriate storage adapter based on configuration
       switch (storageAdapter) {
         case 'mongo':
-          return new MongoStorageAdapter(connection, taskModel);
+          adapter = new MongoStorageAdapter(
+              connection,
+              taskModel,
+              storageOptions.collectionName
+          );
+          break;
         case 'redis':
-          return new RedisStorageAdapter({
+          adapter = new RedisStorageAdapter({
             host: storageOptions.redis?.host,
             port: storageOptions.redis?.port,
             password: storageOptions.redis?.password,
             url: storageOptions.redis?.url,
             keyPrefix: storageOptions.redis?.keyPrefix,
           });
+          break;
         case 'memory':
-          return new MemoryStorageAdapter();
+          adapter = new MemoryStorageAdapter();
+          break;
         default:
           throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
       }
+
+      // Initialize the adapter
+      try {
+        await adapter.initialize();
+        console.log(`Successfully initialized ${storageAdapter} adapter`);
+      } catch (error) {
+        console.error(`Failed to initialize ${storageAdapter} adapter:`, error);
+        throw error;
+      }
+
+      return adapter;
     },
     inject: [
       CLOUD_TASKMQ_CONFIG,

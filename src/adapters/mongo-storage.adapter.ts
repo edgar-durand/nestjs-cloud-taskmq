@@ -36,28 +36,79 @@ export const TaskSchema = new Schema<ITask>(
 export class MongoStorageAdapter implements IStateStorageAdapter {
   private readonly logger = new Logger(MongoStorageAdapter.name);
   private collectionName: string;
+  private taskModel: Model<ITask>;
 
   constructor(
-    @InjectConnection() private connection: Connection,
-    @InjectModel('CloudTaskMQTask') private taskModel: Model<ITask>,
+      @InjectConnection() private connection?: Connection,
+      @InjectModel('CloudTaskMQTask') private injectedModel?: Model<ITask>,
+      private customCollectionName?: string
   ) {
-    this.collectionName = this.taskModel.collection.name;
+    this.logger.debug(`MongoStorageAdapter constructor called with: connection=${!!this.connection}, model=${!!this.injectedModel}, collectionName=${this.customCollectionName}`);
+
+    // If the model is directly injected, use it
+    if (this.injectedModel) {
+      this.logger.debug('Using injected model');
+      this.taskModel = this.injectedModel;
+      this.collectionName = this.taskModel.collection.name;
+      return;
+    }
+
+    // If we have a connection but no model, create the model
+    if (this.connection) {
+      const collName = this.customCollectionName || 'cloud_taskmq_tasks';
+      this.logger.debug(`Using connection to create model with collection: ${collName}`);
+
+      // Check if the model already exists on this connection
+      if (this.connection.models['CloudTaskMQTask']) {
+        this.logger.debug('Model already exists on connection, reusing it');
+        this.taskModel = this.connection.models['CloudTaskMQTask'];
+      } else {
+        this.logger.debug('Creating new model with schema');
+        // Create a new model with our schema
+        this.taskModel = this.connection.model<ITask>(
+            'CloudTaskMQTask',
+            TaskSchema,
+            collName
+        );
+      }
+
+      this.collectionName = collName;
+    } else {
+      this.logger.warn('MongoStorageAdapter created without connection or model!');
+    }
   }
 
   /**
    * Initialize the MongoDB storage adapter
    */
   async initialize(): Promise<void> {
-    this.logger.log(`Initialized MongoStorageAdapter with collection: ${this.collectionName}`);
-    
-    // Ensure indexes
-    await this.connection.collection(this.collectionName).createIndexes([
-      { key: { taskId: 1 }, unique: true },
-      { key: { queueName: 1, status: 1 } },
-      { key: { status: 1 } },
-      { key: { createdAt: 1 } },
-      { key: { lockedUntil: 1 }, sparse: true },
-    ]);
+    this.logger.debug(`Initializing MongoStorageAdapter: taskModel=${!!this.taskModel}, collectionName=${this.collectionName}`);
+
+    if (!this.taskModel) {
+      const error = 'MongoStorageAdapter failed to initialize: No model or connection provided';
+      this.logger.error(error);
+      throw new Error(error);
+    }
+
+    try {
+      const collName = this.taskModel.collection.name;
+      // Create indexes on the collection
+      // Using the model's schema to ensure indexes
+      const indexCreationResults = await Promise.all([
+        this.taskModel.collection.createIndex({ taskId: 1 }, { unique: true }),
+        this.taskModel.collection.createIndex({ queueName: 1, status: 1 }),
+        this.taskModel.collection.createIndex({ status: 1 }),
+        this.taskModel.collection.createIndex({ createdAt: 1 }),
+        this.taskModel.collection.createIndex({ lockedUntil: 1 }, { sparse: true })
+      ]);
+      this.logger.log(`Created ${indexCreationResults.length} indexes on ${collName}`);
+
+      // Verify the model is working by trying to access the collection
+      this.logger.log(`Initialized MongoStorageAdapter with collection: ${collName}`);
+    } catch (err) {
+      this.logger.error(`Error accessing MongoDB collection: ${err.message}`);
+      throw err;
+    }
   }
 
   /**
