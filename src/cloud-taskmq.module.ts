@@ -71,10 +71,13 @@ export class CloudTaskMQModule {
 
     // Only add MongoDB if the storage adapter is 'mongo'
     if (config.storageAdapter === 'mongo') {
+      const collectionName = config.storageOptions.collectionName || 'cloud_taskmq_tasks';
+      console.log(`Registering MongoDB model with collection: ${collectionName}`);
+
       imports.push(
         MongooseModule.forRoot(config.storageOptions.mongoUri),
         MongooseModule.forFeature([
-          { name: 'CloudTaskMQTask', schema: TaskSchema, collection: config.storageOptions.collectionName || 'cloud_taskmq_tasks' }
+          { name: 'CloudTaskMQTask', schema: TaskSchema, collection: collectionName }
         ])
       );
     }
@@ -97,7 +100,6 @@ export class CloudTaskMQModule {
   /**
    * Register the CloudTaskMQ module with async configuration
    *
-   * @param config Async configuration options
    * @returns Dynamic module
    *
    * @example
@@ -129,6 +131,7 @@ export class CloudTaskMQModule {
    * })
    * export class AppModule {}
    * ```
+   * @param asyncConfig
    */
   static forRootAsync(asyncConfig: CloudTaskMQAsyncConfig): DynamicModule {
     // Create config provider first - this needs to be available before any dynamic imports
@@ -226,41 +229,103 @@ export class CloudTaskMQModule {
     // Add MongoDB factory to providers
     providers.push(mongoConfigFactory);
 
-    // Setup MongoDB modules for mongo adapter type only
+    // MongoDB connection setup provider
     providers.push({
-      provide: 'MONGODB_CONNECTION_FACTORY',
+      provide: 'MONGODB_CONNECTION_SETUP',
       useFactory: (config: CloudTaskMQConfig, mongoOptions: any) => {
         if (config.storageAdapter === 'mongo' && mongoOptions) {
-          // Create and inject a custom provider for the mongo storage adapter
-          providers.push({
-            provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-            useFactory: async (connection, model: any) => {
-              const adapter = new MongoStorageAdapter(connection, model, mongoOptions.collectionName);
-              // Explicitly call initialize to ensure the adapter is ready
-              await adapter.initialize();
-              return adapter;
-            },
-            inject: [
-                { token: getConnectionToken(), optional: true },
-                { token: getModelToken('CloudTaskMQTask'), optional: true }
-            ],
-          });
-
           // Add MongoDB modules to imports
           imports.push(
-            MongooseModule.forRoot(mongoOptions.uri),
-            MongooseModule.forFeature([
-              {
-                name: 'CloudTaskMQTask',
-                schema: TaskSchema,
-                collection: mongoOptions.collectionName
-              }
-            ])
+              MongooseModule.forRoot(mongoOptions.uri),
+              MongooseModule.forFeature([
+                {
+                  name: 'CloudTaskMQTask',
+                  schema: TaskSchema,
+                  collection: mongoOptions.collectionName
+                }
+              ])
           );
         }
         return true;
       },
       inject: [CLOUD_TASKMQ_CONFIG, 'MONGODB_OPTIONS_FACTORY'],
+    });
+
+    // Properly configure StorageAdapter with initialization
+    providers.push({
+      provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
+      useFactory: async (config: CloudTaskMQConfig, connection: Connection, model: Model<ITask>) => {
+        const { storageAdapter, storageOptions } = config;
+        let adapter: IStateStorageAdapter;
+
+        console.log(`Creating adapter with storageAdapter=${storageAdapter}, connection=${!!connection}, model=${!!model}`);
+
+        switch (storageAdapter) {
+          case 'mongo':
+            adapter = new MongoStorageAdapter(
+                connection,
+                model,
+                storageOptions.collectionName
+            );
+
+            // Explicitly ensure the TTL index exists for MongoDB
+            if (connection && adapter instanceof MongoStorageAdapter) {
+              console.log(`Creating TTL index for collection: ${storageOptions.collectionName || 'cloud_taskmq_tasks'}`);
+              try {
+                // Directly create TTL index on MongoDB collection
+                const collection = connection.collection(storageOptions.collectionName || 'cloud_taskmq_tasks');
+
+                await collection.createIndex(
+                    { expireAt: 1 },
+                    {
+                      expireAfterSeconds: 0,
+                      sparse: true,
+                      background: true,
+                      name: 'expireAt_ttl_index'
+                    }
+                );
+                console.log('TTL index created successfully in async configuration');
+
+                // Verify the index exists
+                const indexes = await collection.indexes();
+                const ttlIndex = indexes.find(idx => idx.key && idx.key.expireAt === 1);
+                console.log('TTL index verification:', ttlIndex ? 'Found' : 'Not found');
+              } catch (error) {
+                console.error('Error creating TTL index:', error.message);
+              }
+            }
+            break;
+          case 'redis':
+            adapter = new RedisStorageAdapter({
+              host: storageOptions.redis?.host,
+              port: storageOptions.redis?.port,
+              password: storageOptions.redis?.password,
+              url: storageOptions.redis?.url,
+              keyPrefix: storageOptions.redis?.keyPrefix,
+            });
+            break;
+          case 'memory':
+            adapter = new MemoryStorageAdapter();
+            break;
+          default:
+            throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
+        }
+
+        // Initialize the adapter
+        try {
+          await adapter.initialize();
+          console.log(`Successfully initialized ${storageAdapter} adapter`);
+        } catch (error) {
+          console.error(`Error initializing ${storageAdapter} adapter:`, error.message);
+        }
+
+        return adapter;
+      },
+      inject: [
+        CLOUD_TASKMQ_CONFIG,
+        { token: getConnectionToken(), optional: true },
+        { token: getModelToken('CloudTaskMQTask'), optional: true }
+      ],
     });
 
     return {

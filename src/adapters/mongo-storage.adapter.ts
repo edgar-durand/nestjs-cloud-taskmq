@@ -25,6 +25,7 @@ export const TaskSchema = new Schema<ITask>(
     lockedUntil: { type: Date },
     workerId: { type: String },
     metadata: { type: Schema.Types.Mixed, default: {} },
+    expireAt: { type: Date },
   },
   {
     timestamps: true, // Adds createdAt and updatedAt automatically
@@ -92,16 +93,54 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
 
     try {
       const collName = this.taskModel.collection.name;
+
+      // First, check if the TTL index already exists
+      const existingIndexes = await this.taskModel.collection.indexes();
+      const ttlIndexExists = existingIndexes.some(
+          index => index.key && index.key.expireAt === 1 && index.expireAfterSeconds === 0
+      );
+
+      // If TTL index exists but needs to be recreated, drop it
+      if (ttlIndexExists) {
+        this.logger.log(`Found existing TTL index on ${collName}, will validate it`);
+      }
+
       // Create indexes on the collection
       // Using the model's schema to ensure indexes
-      const indexCreationResults = await Promise.all([
+      const indexCreationPromises = [
         this.taskModel.collection.createIndex({ taskId: 1 }, { unique: true }),
         this.taskModel.collection.createIndex({ queueName: 1, status: 1 }),
         this.taskModel.collection.createIndex({ status: 1 }),
         this.taskModel.collection.createIndex({ createdAt: 1 }),
-        this.taskModel.collection.createIndex({ lockedUntil: 1 }, { sparse: true })
-      ]);
+        this.taskModel.collection.createIndex({ lockedUntil: 1 }, { sparse: true }),
+      ];
+
+      // Create the TTL index explicitly
+      const ttlIndexOptions = {
+        expireAfterSeconds: 0,
+        sparse: true,
+        name: 'expireAt_ttl_index' // Give it a specific name for easier reference
+      };
+
+      // Add the TTL index to the promises
+      indexCreationPromises.push(
+          this.taskModel.collection.createIndex({ expireAt: 1 }, ttlIndexOptions)
+      );
+
+      const indexCreationResults = await Promise.all(indexCreationPromises);
       this.logger.log(`Created ${indexCreationResults.length} indexes on ${collName}`);
+
+      // Verify the TTL index was created properly
+      const finalIndexes = await this.taskModel.collection.indexes();
+      const ttlIndex = finalIndexes.find(index =>
+          index.key && index.key.expireAt === 1 && index.expireAfterSeconds === 0
+      );
+
+      if (ttlIndex) {
+        this.logger.log(`TTL index successfully created: ${JSON.stringify(ttlIndex)}`);
+      } else {
+        this.logger.warn(`Failed to create TTL index on expireAt field. Automatic document cleanup may not work.`);
+      }
 
       // Verify the model is working by trying to access the collection
       this.logger.log(`Initialized MongoStorageAdapter with collection: ${collName}`);
@@ -245,5 +284,114 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
   async deleteTask(taskId: string): Promise<boolean> {
     const result = await this.taskModel.deleteOne({ taskId }).exec();
     return result.deletedCount > 0;
+  }
+
+  /**
+   * Mark a task as completed
+   * @param taskId ID of the task to mark as completed
+   * @param result Result data (optional)
+   */
+  async completeTask(taskId: string, result?: any): Promise<ITask> {
+    const update: any = {
+      status: TaskStatus.COMPLETED,
+      completedAt: new Date(),
+    };
+
+    if (result) {
+      update['metadata.result'] = result;
+    }
+
+    const task = await this.taskModel.findOneAndUpdate(
+        { taskId },
+        { $set: update },
+        { new: true }
+    ).exec();
+
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    // Handle removeOnComplete if defined in task metadata
+    if (task.metadata?.removeOnComplete !== undefined) {
+      await this.handleTaskCleanup(task, task.metadata.removeOnComplete);
+    }
+
+    return task;
+  }
+
+  /**
+   * Mark a task as failed
+   * @param taskId ID of the task to mark as failed
+   * @param error Error message
+   */
+  async failTask(taskId: string, error: string): Promise<ITask> {
+    const task = await this.taskModel.findOneAndUpdate(
+        { taskId },
+        {
+          $set: {
+            status: TaskStatus.FAILED,
+            completedAt: new Date(),
+            failureReason: error,
+          },
+        },
+        { new: true }
+    ).exec();
+
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    // Handle removeOnFail if defined in task metadata
+    if (task.metadata?.removeOnFail !== undefined) {
+      await this.handleTaskCleanup(task, task.metadata.removeOnFail);
+    }
+
+    return task;
+  }
+
+  /**
+   * Handle task cleanup based on removal option
+   * @param task Task to potentially clean up
+   * @param removeOption Cleanup option (true, false, or seconds to wait)
+   */
+  private async handleTaskCleanup(task: ITask, removeOption: boolean | number): Promise<void> {
+    if (removeOption === false) {
+      return; // Don't remove
+    }
+
+    if (removeOption === true) {
+      try {
+        // Remove immediately
+        const result = await this.taskModel.deleteOne({ taskId: task.taskId }).exec();
+        if (result.deletedCount > 0) {
+          this.logger.log(`Removed task ${task.taskId} immediately as configured`);
+        } else {
+          this.logger.warn(`Failed to remove task ${task.taskId}: document not found`);
+        }
+      } catch (error) {
+        this.logger.error(`Error removing task ${task.taskId}: ${error.message}`);
+      }
+      return;
+    }
+
+    if (typeof removeOption === 'number' && removeOption > 0) {
+      try {
+        // Set the expireAt field for TTL index to handle automatic deletion
+        const expireAt = new Date(Date.now() + (removeOption * 1000));
+
+        const result = await this.taskModel.updateOne(
+            { taskId: task.taskId },
+            { $set: { expireAt } }
+        ).exec();
+
+        if (result.matchedCount > 0) {
+          this.logger.log(`Set TTL expiration for task ${task.taskId} to expire in ${removeOption} seconds`);
+        } else {
+          this.logger.warn(`Failed to set TTL for task ${task.taskId}: document not found`);
+        }
+      } catch (error) {
+        this.logger.error(`Error setting TTL for task ${task.taskId}: ${error.message}`);
+      }
+    }
   }
 }

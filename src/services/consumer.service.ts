@@ -254,7 +254,7 @@ export class ConsumerService implements OnModuleInit {
       
       // Process the task
       const result = await processor.instance[processor.processMethod](cloudTask);
-      
+
       // Update task status to COMPLETED
       await this.storageAdapter.updateTaskStatus(
         taskId,
@@ -266,6 +266,8 @@ export class ConsumerService implements OnModuleInit {
           workerId: undefined, 
         },
       );
+
+      await this.storageAdapter.completeTask(taskId, result);
       
       // Call onCompleted handler if it exists
       if (processor.onCompleted) {
@@ -294,6 +296,8 @@ export class ConsumerService implements OnModuleInit {
           retryCount: (taskRecord.retryCount || 0) + 1, 
         },
       );
+
+      await this.storageAdapter.failTask(taskId, error);
       
       // Call onFailed handler if it exists
       if (processor.onFailed) {

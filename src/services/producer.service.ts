@@ -128,7 +128,12 @@ export class ProducerService implements OnModuleInit {
       queueName,
       status: TaskStatus.IDLE,
       payload,
-      metadata: options.metadata,
+      metadata: {
+        ...(options.metadata || {}),
+        // Store cleanup options in metadata if provided
+        ...(options.removeOnComplete !== undefined && { removeOnComplete: options.removeOnComplete }),
+        ...(options.removeOnFail !== undefined && { removeOnFail: options.removeOnFail }),
+      },
     };
     
     const savedTask = await this.storageAdapter.createTask(taskRecord);

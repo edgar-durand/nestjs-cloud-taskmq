@@ -398,4 +398,102 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
     
     return true;
   }
+
+  async completeTask(taskId: string, result?: any): Promise<ITask> {
+    const task = await this.getTaskById(taskId);
+
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    const update: any = {
+      status: TaskStatus.COMPLETED,
+      completedAt: new Date(),
+    };
+
+    if (result) {
+      if (!task.metadata) {
+        task.metadata = {};
+      }
+      task.metadata.result = result;
+    }
+
+    const updatedTask = await this.updateTaskStatus(
+        taskId,
+        TaskStatus.COMPLETED,
+        update
+    );
+
+    if (!updatedTask) {
+      throw new Error(`Failed to update task ${taskId}`);
+    }
+
+    // Handle removeOnComplete if defined in task metadata
+    if (task.metadata?.removeOnComplete !== undefined) {
+      await this.handleTaskCleanup(updatedTask, task.metadata.removeOnComplete);
+    }
+
+    return updatedTask;
+  }
+
+  async failTask(taskId: string, error: any): Promise<ITask> {
+    const task = await this.getTaskById(taskId);
+
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    const updatedTask = await this.updateTaskStatus(
+        taskId,
+        TaskStatus.FAILED,
+        {
+          completedAt: new Date(),
+          failureReason: error,
+        }
+    );
+
+    if (!updatedTask) {
+      throw new Error(`Failed to update task ${taskId}`);
+    }
+
+    // Handle removeOnFail if defined in task metadata
+    if (task.metadata?.removeOnFail !== undefined) {
+      await this.handleTaskCleanup(updatedTask, task.metadata.removeOnFail);
+    }
+
+    return updatedTask;
+  }
+
+  /**
+   * Handle task cleanup based on removal option
+   * @param task Task to potentially clean up
+   * @param removeOption Cleanup option (true, false, or seconds to wait)
+   */
+  private async handleTaskCleanup(task: ITask, removeOption: boolean | number): Promise<void> {
+    if (removeOption === false) {
+      return; // Don't remove
+    }
+
+    if (removeOption === true) {
+      // Remove immediately
+      await this.deleteTask(task.taskId);
+      this.logger.log(`Removed task ${task.taskId} immediately as configured`);
+      return;
+    }
+
+    if (typeof removeOption === 'number' && removeOption > 0) {
+      // Use Redis's built-in TTL mechanism to automatically expire the task
+      const taskKey = this.getTaskKey(task.taskId);
+      await this.client.expire(taskKey, removeOption);
+
+      // Add a cleanup flag to the task metadata to signal that this task will be automatically removed
+      await this.client.hset(taskKey, 'metadata', JSON.stringify({
+        ...JSON.parse(await this.client.hget(taskKey, 'metadata') || '{}'),
+        scheduled_for_cleanup: true,
+        cleanup_after: removeOption
+      }));
+
+      this.logger.log(`Set Redis TTL for task ${task.taskId} to expire in ${removeOption} seconds`);
+    }
+  }
 }

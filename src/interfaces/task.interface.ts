@@ -76,6 +76,12 @@ export interface ITask {
    * Any additional metadata for the task
    */
   metadata?: Record<string, any>;
+
+  /**
+   * When the document should be automatically removed by MongoDB TTL index
+   * This is used internally by storage adapters for automatic cleanup
+   */
+  expireAt?: Date;
 }
 
 /**
@@ -91,6 +97,22 @@ export interface AddTaskOptions {
    * Additional metadata to store with the task
    */
   metadata?: Record<string, any>;
+
+  /**
+   * Whether to remove the task from storage once it's completed.
+   * If set to true, the task will be removed immediately on completion.
+   * If set to a number, the task will be removed after that many seconds.
+   * If set to false or not provided, the task will remain in storage.
+   */
+  removeOnComplete?: boolean | number;
+
+  /**
+   * Whether to remove the task from storage if it fails.
+   * If set to true, the task will be removed immediately after failing.
+   * If set to a number, the task will be removed after that many seconds.
+   * If set to false or not provided, the task will remain in storage.
+   */
+  removeOnFail?: boolean | number;
 }
 
 /**

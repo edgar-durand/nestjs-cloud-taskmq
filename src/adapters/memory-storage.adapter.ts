@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import {Injectable, Logger} from '@nestjs/common';
 import { IStateStorageAdapter, TaskQueryOptions } from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
 
@@ -9,7 +9,9 @@ import { ITask, TaskStatus } from '../interfaces/task.interface';
 @Injectable()
 export class MemoryStorageAdapter implements IStateStorageAdapter {
   private tasks: Map<string, ITask & { lockedBy?: string; lockedUntil?: Date }> = new Map();
-  
+  private readonly logger = new Logger(MemoryStorageAdapter.name);
+  private cleanupTimeouts: Map<string, NodeJS.Timeout> = new Map();
+
   /**
    * Initialize the storage adapter
    */
@@ -215,6 +217,129 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * @returns True if the task was deleted, false if it wasn't found
    */
   async deleteTask(taskId: string): Promise<boolean> {
+    // Cancel any cleanup timeouts for this task
+    if (this.cleanupTimeouts.has(taskId)) {
+      clearTimeout(this.cleanupTimeouts.get(taskId));
+      this.cleanupTimeouts.delete(taskId);
+    }
+
     return this.tasks.delete(taskId);
+  }
+
+  /**
+   * Mark a task as completed
+   * @param taskId ID of the task to mark as completed
+   * @param result Result data (optional)
+   */
+  async completeTask(taskId: string, result?: any): Promise<ITask> {
+    const task = this.tasks.get(taskId);
+
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    const now = new Date();
+    const updatedTask = {
+      ...task,
+      status: TaskStatus.COMPLETED,
+      completedAt: now,
+      updatedAt: now,
+    };
+
+    // Add result to metadata if provided
+    if (result) {
+      if (!updatedTask.metadata) {
+        updatedTask.metadata = {};
+      }
+      updatedTask.metadata.result = result;
+    }
+
+    this.tasks.set(taskId, updatedTask);
+
+    // Handle removal if configured
+    if (updatedTask.metadata?.removeOnComplete !== undefined) {
+      await this.handleTaskCleanup(updatedTask, updatedTask.metadata.removeOnComplete);
+    }
+
+    // Return a clean task object without the extra fields
+    const { lockedBy, lockedUntil, ...cleanTask } = updatedTask;
+    return cleanTask;
+  }
+
+  /**
+   * Mark a task as failed
+   * @param taskId ID of the task to mark as failed
+   * @param error Error message
+   */
+  async failTask(taskId: string, error: string): Promise<ITask> {
+    const task = this.tasks.get(taskId);
+
+    if (!task) {
+      throw new Error(`Task ${taskId} not found`);
+    }
+
+    const now = new Date();
+    const updatedTask = {
+      ...task,
+      status: TaskStatus.FAILED,
+      failureReason: error,
+      completedAt: now,
+      updatedAt: now,
+    };
+
+    this.tasks.set(taskId, updatedTask);
+
+    // Handle removal if configured
+    if (updatedTask.metadata?.removeOnFail !== undefined) {
+      await this.handleTaskCleanup(updatedTask, updatedTask.metadata.removeOnFail);
+    }
+
+    // Return a clean task object without the extra fields
+    const { lockedBy, lockedUntil, ...cleanTask } = updatedTask;
+    return cleanTask;
+  }
+
+  /**
+   * Handle task cleanup based on removal option
+   * @param task Task to potentially clean up
+   * @param removeOption Cleanup option (true, false, or seconds to wait)
+   */
+  private async handleTaskCleanup(task: ITask, removeOption: boolean | number): Promise<void> {
+    if (removeOption === false) {
+      return; // Don't remove
+    }
+
+    if (removeOption === true) {
+      // Remove immediately
+      await this.deleteTask(task.taskId);
+      this.logger.log(`Removed task ${task.taskId} immediately as configured`);
+      return;
+    }
+
+    if (typeof removeOption === 'number' && removeOption > 0) {
+      // For memory adapter, we'll use setTimeout but track timeouts to be able to clean them up
+      // Cancel any existing timeout for this task
+      if (this.cleanupTimeouts.has(task.taskId)) {
+        clearTimeout(this.cleanupTimeouts.get(task.taskId));
+      }
+
+      // Set a new timeout
+      const deleteAfterMs = removeOption * 1000;
+      const timeout = setTimeout(async () => {
+        try {
+          await this.deleteTask(task.taskId);
+          this.logger.log(`Removed task ${task.taskId} after ${removeOption} seconds as configured`);
+        } catch (error) {
+          this.logger.error(`Failed to clean up task ${task.taskId}: ${error.message}`);
+        } finally {
+          // Clean up the timeout reference
+          this.cleanupTimeouts.delete(task.taskId);
+        }
+      }, deleteAfterMs);
+
+      // Store the timeout reference
+      this.cleanupTimeouts.set(task.taskId, timeout);
+      this.logger.log(`Scheduled removal of task ${task.taskId} in ${removeOption} seconds`);
+    }
   }
 }

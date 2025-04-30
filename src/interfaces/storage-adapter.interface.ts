@@ -101,4 +101,7 @@ export interface IStateStorageAdapter {
    * @param taskId ID of the task to delete
    */
   deleteTask(taskId: string): Promise<boolean>;
+
+  completeTask(taskId: string, result?: any): Promise<ITask>;
+  failTask(taskId: string, error: any): Promise<ITask>;
 }
