@@ -1,6 +1,6 @@
 {
   "name": "nestjs-cloud-taskmq",
-  "version": "0.1.15",
+  "version": "0.1.18",
   "description": "NestJS library for integrating Google Cloud Tasks with MongoDB/Redis for a BullMQ-like queue system",
   "license": "MIT",
   "main": "dist/index.js",

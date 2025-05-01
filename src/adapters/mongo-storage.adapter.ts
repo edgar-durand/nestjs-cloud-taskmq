@@ -94,17 +94,6 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
     try {
       const collName = this.taskModel.collection.name;
 
-      // First, check if the TTL index already exists
-      const existingIndexes = await this.taskModel.collection.indexes();
-      const ttlIndexExists = existingIndexes.some(
-          index => index.key && index.key.expireAt === 1 && index.expireAfterSeconds === 0
-      );
-
-      // If TTL index exists but needs to be recreated, drop it
-      if (ttlIndexExists) {
-        this.logger.log(`Found existing TTL index on ${collName}, will validate it`);
-      }
-
       // Create indexes on the collection
       // Using the model's schema to ensure indexes
       const indexCreationPromises = [
@@ -115,27 +104,30 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
         this.taskModel.collection.createIndex({ lockedUntil: 1 }, { sparse: true }),
       ];
 
-      // Create the TTL index explicitly
-      const ttlIndexOptions = {
-        expireAfterSeconds: 0,
-        sparse: true,
-        name: 'expireAt_ttl_index' // Give it a specific name for easier reference
-      };
+      // Verify the index exists
+      const indexes = await this.taskModel.collection.indexes();
+      const ttlIndex = indexes.find(idx => idx.key && idx.key.expireAt === 1);
 
-      // Add the TTL index to the promises
-      indexCreationPromises.push(
-          this.taskModel.collection.createIndex({ expireAt: 1 }, ttlIndexOptions)
-      );
+      if (!ttlIndex) {
+        // Create the TTL index explicitly
+        const ttlIndexOptions = {
+          expireAfterSeconds: 0,
+          sparse: true,
+          background: true,
+          name: 'expireAt_ttl_index'
+        };
+        // Directly create TTL index on MongoDB collection
+        await this.taskModel.collection.createIndex(
+            { expireAt: 1 },
+            ttlIndexOptions
+        );
+        this.logger.log('TTL index created successfully in async configuration');
+      } else {
+        this.logger.log('TTL index already exists, skipping creation');
+      }
 
       const indexCreationResults = await Promise.all(indexCreationPromises);
       this.logger.log(`Created ${indexCreationResults.length} indexes on ${collName}`);
-
-      // Verify the TTL index was created properly
-      const finalIndexes = await this.taskModel.collection.indexes();
-      const ttlIndex = finalIndexes.find(index =>
-          index.key && index.key.expireAt === 1 && index.expireAfterSeconds === 0
-      );
-
       if (ttlIndex) {
         this.logger.log(`TTL index successfully created: ${JSON.stringify(ttlIndex)}`);
       } else {

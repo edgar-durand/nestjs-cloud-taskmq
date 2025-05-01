@@ -20,6 +20,7 @@ import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
 import { CloudTask } from '../models/cloud-task.model';
 import { CloudTaskMQConfig } from '../interfaces/config.interface';
+import {CLOUD_TASK_CONSUMER_KEY, CloudTaskConsumerOptions} from "../decorators/cloud-task-consumer.decorator";
 
 /**
  * Structure to hold discovered task processors
@@ -51,6 +52,7 @@ interface TaskProcessorMetadata {
 export class ConsumerService implements OnModuleInit {
   private readonly logger = new Logger(ConsumerService.name);
   private processors: Map<string, TaskProcessorMetadata> = new Map();
+  private controllerMetadata: Map<string, CloudTaskConsumerOptions> = new Map();
   private workerId: string;
   private lockDurationMs: number;
 
@@ -84,8 +86,30 @@ export class ConsumerService implements OnModuleInit {
    * Discover all processor classes in the application
    */
   private async discoverProcessors() {
-    // Discover all providers in the application
+    // Discover all providers and controllers in the application
     const providers = this.discoveryService.getProviders();
+    const controllers = this.discoveryService.getControllers();
+
+    // Discover controllers with CloudTaskConsumer decorator
+    for (const wrapper of controllers) {
+      if (wrapper.instance) {
+        const metadata = Reflect.getMetadata(CLOUD_TASK_CONSUMER_KEY, wrapper.instance.constructor);
+
+        if (metadata) {
+          // Store metadata by queue name for quick lookup during task processing
+          if (metadata.queues && Array.isArray(metadata.queues)) {
+            for (const queue of metadata.queues) {
+              this.controllerMetadata.set(queue, metadata);
+              this.logger.debug(`Found controller for queue '${queue}' with metadata: ${JSON.stringify(metadata)}`);
+            }
+          } else {
+            // If no specific queues, this controller handles all queues
+            this.controllerMetadata.set('*', metadata);
+            this.logger.debug(`Found controller for all queues with metadata: ${JSON.stringify(metadata)}`);
+          }
+        }
+      }
+    }
     
     // Filter providers that have the @Processor decorator
     const processorProviders = providers.filter(wrapper => this.isProcessor(wrapper));
@@ -207,12 +231,35 @@ export class ConsumerService implements OnModuleInit {
       };
       taskRecord = await this.storageAdapter.createTask(newTask);
     }
-    
+
+    // Determine the lock duration to use with priority:
+    // 1. Controller-level setting (if provided)
+    // 2. Queue-specific setting (if exists)
+    // 3. Global default
+    let lockDurationMs = this.lockDurationMs; // Start with global default
+
+    // Check for queue-specific lock duration
+    const queueConfig = this.config.queues.find(q => q.name === queueName);
+    if (queueConfig && typeof queueConfig.lockDurationMs === 'number') {
+      lockDurationMs = queueConfig.lockDurationMs;
+      this.logger.debug(`Using queue-specific lock duration for ${queueName}: ${lockDurationMs}ms`);
+    }
+
+    // Look up controller metadata for this queue
+    const queueMetadata = this.controllerMetadata?.get(queueName) || this.controllerMetadata?.get('*');
+
+    // Controller-level setting takes highest priority
+    if (queueMetadata && typeof queueMetadata.lockDurationMs === 'number') {
+      lockDurationMs = queueMetadata.lockDurationMs;
+      this.logger.debug(`Using controller-specific lock duration for ${queueName}: ${lockDurationMs}ms`);
+    }
+
+
     // Attempt to acquire a lock on the task
     const lockAcquired = await this.storageAdapter.acquireTaskLock(
       taskId,
       this.workerId,
-      this.lockDurationMs,
+      lockDurationMs,
     );
     
     if (!lockAcquired) {

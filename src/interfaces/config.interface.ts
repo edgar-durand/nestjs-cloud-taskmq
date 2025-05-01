@@ -23,6 +23,12 @@ export interface QueueConfig {
    * URL where tasks from this queue will be delivered (if different from default)
    */
   processorUrl?: string;
+
+  /**
+   * Queue-specific lock duration in milliseconds
+   * Overrides the global lockDurationMs when specified
+   */
+  lockDurationMs?: number;
 }
 
 /**
@@ -52,7 +58,7 @@ export interface CloudTaskMQConfig {
   /**
    * Name of the storage adapter to use ('mongo' or 'redis')
    */
-  storageAdapter: 'mongo' | 'redis' | string;
+  storageAdapter: 'mongo' | 'redis' | 'memory' | string;
   
   /**
    * Storage adapter specific options
@@ -84,7 +90,7 @@ export interface CloudTaskMQConfig {
      */
     [key: string]: any;
   };
-  
+
   /**
    * Default lock duration in milliseconds (how long a task stays locked while processing)
    */

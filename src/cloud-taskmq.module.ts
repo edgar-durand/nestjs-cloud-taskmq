@@ -268,31 +268,8 @@ export class CloudTaskMQModule {
                 storageOptions.collectionName
             );
 
-            // Explicitly ensure the TTL index exists for MongoDB
             if (connection && adapter instanceof MongoStorageAdapter) {
-              console.log(`Creating TTL index for collection: ${storageOptions.collectionName || 'cloud_taskmq_tasks'}`);
-              try {
-                // Directly create TTL index on MongoDB collection
-                const collection = connection.collection(storageOptions.collectionName || 'cloud_taskmq_tasks');
-
-                await collection.createIndex(
-                    { expireAt: 1 },
-                    {
-                      expireAfterSeconds: 0,
-                      sparse: true,
-                      background: true,
-                      name: 'expireAt_ttl_index'
-                    }
-                );
-                console.log('TTL index created successfully in async configuration');
-
-                // Verify the index exists
-                const indexes = await collection.indexes();
-                const ttlIndex = indexes.find(idx => idx.key && idx.key.expireAt === 1);
-                console.log('TTL index verification:', ttlIndex ? 'Found' : 'Not found');
-              } catch (error) {
-                console.error('Error creating TTL index:', error.message);
-              }
+              // Do any additional setup for MongoDB adapter if needed
             }
             break;
           case 'redis':

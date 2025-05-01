@@ -25,6 +25,12 @@ export interface CloudTaskConsumerOptions {
    * Whether to validate OIDC tokens from Cloud Tasks (recommended for security)
    */
   validateOidcToken?: boolean;
+
+  /**
+   * Custom lock duration in milliseconds for tasks processed by this controller
+   * This overrides both the global and queue-specific lock durations
+   */
+  lockDurationMs?: number;
 }
 
 /**
@@ -60,6 +66,7 @@ export function CloudTaskConsumer(options: CloudTaskConsumerOptions = {}) {
     SetMetadata(CLOUD_TASK_CONSUMER_KEY, {
       queues: options.queues,
       validateOidcToken: options.validateOidcToken ?? true,
+      lockDurationMs: options.lockDurationMs,
     }),
   );
 }
