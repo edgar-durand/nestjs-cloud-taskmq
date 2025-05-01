@@ -230,17 +230,25 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
   ): Promise<boolean> {
     const taskKey = this.getTaskKey(taskId);
     const task = await this.getTaskById(taskId);
-    
+
     if (!task) {
+      this.logger.warn(`Failed to acquire lock for task ${taskId} - task does not exist`);
       return false;
     }
-    
+
+    // Check if task is already completed
+    if (task.status === TaskStatus.COMPLETED) {
+      this.logger.debug(`Skipping already completed task ${taskId}`);
+      return false;
+    }
+
     // Check if task is already locked
     if (
-      task.lockedUntil &&
-      task.lockedUntil > new Date() &&
-      task.workerId !== workerId
+        task.lockedUntil &&
+        task.lockedUntil > new Date() &&
+        task.workerId !== workerId
     ) {
+      this.logger.debug(`Task ${taskId} is locked until ${task.lockedUntil} by worker ${task.workerId}`);
       return false;
     }
     

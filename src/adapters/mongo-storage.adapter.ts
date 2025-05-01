@@ -189,11 +189,30 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
     workerId: string,
     lockDurationMs: number,
   ): Promise<boolean> {
+    // First check if the task exists and what its status is
+    const existingTask = await this.taskModel.findOne({ taskId }).exec();
+
+    if (existingTask) {
+      // If task is already completed, log and return false
+      if (existingTask.status === TaskStatus.COMPLETED) {
+        this.logger.debug(`Skipping already completed task ${taskId}`);
+        return false;
+      }
+
+      // If task is currently locked by another worker, log and return false
+      if (existingTask.lockedUntil && existingTask.lockedUntil > new Date() && existingTask.workerId !== workerId) {
+        this.logger.debug(`Task ${taskId} is locked until ${existingTask.lockedUntil} by worker ${existingTask.workerId}`);
+        return false;
+      }
+    }
+
     const lockedUntil = new Date(Date.now() + lockDurationMs);
     
     const result = await this.taskModel.findOneAndUpdate(
       {
         taskId,
+        // Only acquire lock on tasks that are not COMPLETED or FAILED
+        status: { $nin: [TaskStatus.COMPLETED] },
         $or: [
           { lockedUntil: { $exists: false } },
           { lockedUntil: { $lt: new Date() } },

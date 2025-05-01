@@ -99,6 +99,13 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
   ): Promise<boolean> {
     const task = this.tasks.get(taskId);
     if (!task) {
+      this.logger.warn(`Failed to acquire lock for task ${taskId} - task does not exist`);
+      return false;
+    }
+
+    // Check if task is already completed
+    if (task.status === TaskStatus.COMPLETED) {
+      this.logger.debug(`Skipping already completed task ${taskId}`);
       return false;
     }
     
@@ -106,6 +113,7 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
     if (task.lockedBy && task.lockedUntil && task.lockedUntil > new Date()) {
       // Task is locked by another worker
       if (task.lockedBy !== workerId) {
+        this.logger.debug(`Task ${taskId} is locked until ${task.lockedUntil} by worker ${task.lockedBy}`);
         return false;
       }
       // Task is already locked by this worker, extend the lock
@@ -116,7 +124,10 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
     task.lockedBy = workerId;
     task.lockedUntil = lockUntil;
     task.updatedAt = new Date();
-    
+    task.status = TaskStatus.ACTIVE;
+    if (!task.startedAt) {
+      task.startedAt = new Date();
+    }
     this.tasks.set(taskId, task);
     return true;
   }
