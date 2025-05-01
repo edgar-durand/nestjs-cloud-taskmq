@@ -73,7 +73,7 @@ export class ProducerService implements OnModuleInit {
     }
     
     // Generate a unique task ID
-    const taskId = uuidv4();
+    const taskId = options.taskId || uuidv4();
     
     // Determine target URL for the task
     const targetUrl = queueConfig.processorUrl || this.defaultProcessorUrl;
@@ -97,6 +97,13 @@ export class ProducerService implements OnModuleInit {
         })).toString('base64'),
       },
     };
+
+    // If a custom taskId was provided, set the name property
+    if (options.taskId) {
+      // Format: projects/PROJECT_ID/locations/LOCATION_ID/queues/QUEUE_ID/tasks/TASK_ID
+      task.name = `projects/${this.projectId}/locations/${this.location}/queues/${queueName}/tasks/${options.taskId}`;
+      this.logger.debug(`Using custom task name: ${task.name}`);
+    }
     
     // Set schedule time if provided
     if (options.scheduleTime) {

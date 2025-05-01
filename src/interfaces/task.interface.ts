@@ -89,6 +89,12 @@ export interface ITask {
  */
 export interface AddTaskOptions {
   /**
+   * Custom task ID to use instead of generating a UUID
+   * This can be useful for idempotent task creation or when you need to integrate with external systems
+   */
+  taskId?: string;
+
+  /**
    * When to schedule the task. If not provided, the task is scheduled immediately.
    */
   scheduleTime?: Date;
