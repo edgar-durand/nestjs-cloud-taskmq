@@ -21,6 +21,7 @@ import { TaskSchema } from './adapters/mongo-storage.adapter';
 import { IStateStorageAdapter } from './interfaces/storage-adapter.interface';
 import {Connection, Model} from "mongoose";
 import {ITask} from "./interfaces/task.interface";
+import {CloudTaskProcessorInterceptor} from "./interceptors/cloud-task-processor.interceptor";
 
 /**
  * Main module for CloudTaskMQ. Use forRoot or forRootAsync to configure and register.
@@ -60,6 +61,15 @@ export class CloudTaskMQModule {
    * ```
    */
   static forRoot(config: CloudTaskMQConfig): DynamicModule {
+    // Validate configuration
+    if (!config.projectId) {
+      throw new Error('CloudTaskMQ config must include a projectId');
+    }
+
+    if (!config.location) {
+      throw new Error('CloudTaskMQ config must include a location');
+    }
+
     // Setup providers
     const configProvider: Provider = {
       provide: CLOUD_TASKMQ_CONFIG,
@@ -91,6 +101,7 @@ export class CloudTaskMQModule {
         configProvider,
         ProducerService,
         ConsumerService,
+        CloudTaskProcessorInterceptor,
         createStorageAdapterProvider(config),
       ],
       exports: [ProducerService, ConsumerService],
@@ -304,6 +315,8 @@ export class CloudTaskMQModule {
         { token: getModelToken('CloudTaskMQTask'), optional: true }
       ],
     });
+
+    providers.push(CloudTaskProcessorInterceptor);
 
     return {
       module: CloudTaskMQModule,

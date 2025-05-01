@@ -1,5 +1,6 @@
-import { applyDecorators, Controller, Post, UseGuards } from '@nestjs/common';
+import {applyDecorators, Controller, Post, UseGuards, UseInterceptors} from '@nestjs/common';
 import { SetMetadata } from '@nestjs/common';
+import {CloudTaskProcessorInterceptor} from "../interceptors/cloud-task-processor.interceptor";
 
 /**
  * Metadata key for cloud task consumer controllers
@@ -31,6 +32,12 @@ export interface CloudTaskConsumerOptions {
    * This overrides both the global and queue-specific lock durations
    */
   lockDurationMs?: number;
+
+  /**
+   * If true, the controller will automatically process tasks without requiring
+   * manual calls to consumerService.processTask(). Default is true.
+   */
+  autoProcessTasks?: boolean;
 }
 
 /**
@@ -63,6 +70,7 @@ export function CloudTaskConsumer(options: CloudTaskConsumerOptions = {}) {
   // Combine decorators
   return applyDecorators(
     Controller(path),
+    UseInterceptors(CloudTaskProcessorInterceptor),
     SetMetadata(CLOUD_TASK_CONSUMER_KEY, {
       queues: options.queues,
       validateOidcToken: options.validateOidcToken ?? true,
