@@ -122,6 +122,13 @@ export interface CloudTaskMQConfig {
    * Default lock duration in milliseconds (how long a task stays locked while processing)
    */
   lockDurationMs?: number;
+
+  /**
+   * Automatically create missing queues in Cloud Tasks if they don't exist
+   * If false (default), the module will throw an error if a queue doesn't exist
+   * @default false
+   */
+  autoCreateQueues?: boolean;
 }
 
 /**

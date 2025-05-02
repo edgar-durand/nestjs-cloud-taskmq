@@ -34,10 +34,102 @@ export class ProducerService implements OnModuleInit {
    */
   async onModuleInit() {
     this.logger.log(`Initialized ProducerService with ${this.queueConfigs.size} queues`);
-    
-    // Log registered queues
-    for (const [name, config] of this.queueConfigs.entries()) {
-      this.logger.log(`Registered queue: ${name} -> ${config.path}`);
+
+    try {
+      // Validate all configured queues exist in GCP (or create them if autoCreateQueues is enabled)
+      await this.validateQueues();
+
+      // Log registered queues
+      for (const [name, config] of this.queueConfigs.entries()) {
+        this.logger.log(`Registered queue: ${name} -> ${config.path}`);
+      }
+    } catch (error) {
+      this.logger.error(`Error during queue validation: ${error.message}`);
+      throw error; // Re-throw to prevent app from starting with invalid queue config
+    }
+  }
+
+  /**
+   * Validate that all configured queues exist in GCP Cloud Tasks
+   * If autoCreateQueues is enabled, creates missing queues
+   */
+  private async validateQueues(): Promise<void> {
+    // Skip validation if no queues configured
+    if (this.queueConfigs.size === 0) {
+      this.logger.warn('No queues configured');
+      return;
+    }
+
+    const parent = `projects/${this.projectId}/locations/${this.location}`;
+
+    try {
+      // List all existing queues
+      const [existingQueues] = await this.client.listQueues({ parent });
+      const existingQueuePaths = new Set(existingQueues.map(q => q.name));
+
+      // Check each configured queue
+      const missingQueues: QueueConfig[] = [];
+
+      for (const [name, queueConfig] of this.queueConfigs.entries()) {
+        if (!existingQueuePaths.has(queueConfig.path)) {
+          missingQueues.push(queueConfig);
+        }
+      }
+
+      // Handle missing queues
+      if (missingQueues.length > 0) {
+        if (this.config.autoCreateQueues) {
+          // Create missing queues
+          await this.createMissingQueues(missingQueues);
+        } else {
+          // Throw error listing all missing queues
+          const missingQueueNames = missingQueues.map(q => q.name).join(', ');
+          this.logger.error(new Error(
+              `The following queues are configured but do not exist in GCP Cloud Tasks: ${missingQueueNames}. ` +
+              `Either create these queues manually or set 'autoCreateQueues: true' in your CloudTaskMQModule configuration.`
+          ));
+        }
+      } else {
+        this.logger.log('All configured queues exist in GCP Cloud Tasks');
+      }
+    } catch (error) {
+      if (error.code === 'PERMISSION_DENIED') {
+        this.logger.warn(
+            'Unable to list queues due to permission issues. Make sure your service account has ' +
+            'cloudtasks.queues.list permission. Skipping queue validation.'
+        );
+      } else if (!error.message.includes('do not exist in GCP Cloud Tasks')) {
+        // Re-throw if it's not our custom error about missing queues
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Create missing queues in GCP Cloud Tasks
+   */
+  private async createMissingQueues(missingQueues: QueueConfig[]): Promise<void> {
+    for (const queueConfig of missingQueues) {
+      try {
+        // Extract queue name from path (last part after the last slash)
+        const queueName = queueConfig.path.split('/').pop();
+        const parent = `projects/${this.projectId}/locations/${this.location}`;
+
+        this.logger.log(`Creating queue: ${queueConfig.name} in GCP Cloud Tasks`);
+
+        // Create the queue
+        await this.client.createQueue({
+          parent,
+          queue: {
+            name: queueConfig.path,
+          }
+        });
+
+        this.logger.log(`Successfully created queue: ${queueConfig.name}`);
+      } catch (error) {
+        this.logger.error(`Failed to create queue ${queueConfig.name}: ${error.message}`);
+        throw new Error(`Failed to create queue ${queueConfig.name}: ${error.message}`);
+      }
     }
   }
 

@@ -5,12 +5,16 @@ CloudTaskMQ is a NestJS library that provides a queue system similar to BullMQ b
 ## Features
 
 - **Google Cloud Tasks Integration**: Utilize GCP's managed queue service for task scheduling and delivery
-- **State Tracking**: Persistent storage of task states (idle, active, completed, failed) using MongoDB or Redis
+- **State Tracking**: Persistent storage of task states (idle, active, completed, failed) using MongoDB, Redis, or in-memory storage
 - **Storage Agnostic**: Switch between storage providers without changing your application code
+- **Rate Limiting**: Built-in persistent rate limiting to control task processing throughput
+- **Automatic Queue Creation**: Optionally create missing queues in GCP Cloud Tasks
+- **Task Retries**: Configure retry attempts for failed tasks with customizable backoff
 - **Event-Driven Programming**: Familiar BullMQ-like decorators for lifecycle events
 - **Easy Job Processing**: Simple API for adding tasks to queues and processing them
 - **Observability**: Track task status and monitor queue health
 - **TypeScript Support**: Built with and for TypeScript with type safety in mind
+
 
 ## Installation
 
@@ -64,6 +68,36 @@ import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
 export class AppModule {}
 ```
 
+### Using Redis Storage
+
+```typescript
+CloudTaskMQModule.forRoot({
+  // other config...
+  storageAdapter: 'redis',
+  storageOptions: {
+    redis: {
+      host: 'localhost',
+      port: 6379,
+      password: 'password', // Optional
+      // OR use a connection URL
+      url: 'redis://:password@localhost:6379',
+      keyPrefix: 'cloud-taskmq:', // Optional, defaults to 'cloud-taskmq:'
+    },
+  },
+  // other config...
+})
+```
+
+### Using In-Memory Storage (for development/testing)
+
+```typescript
+CloudTaskMQModule.forRoot({
+  // other config...
+  storageAdapter: 'memory',
+  // other config...
+})
+```
+
 ### 2. Using Environment Variables (Recommended)
 
 ```typescript
@@ -105,60 +139,85 @@ import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
 export class AppModule {}
 ```
 
+### 2. Using Environment Configuration (Async)
+
+```typescript
+import { Module } from '@nestjs/common';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
+
+@Module({
+  imports: [
+    ConfigModule.forRoot(),
+    CloudTaskMQModule.forRootAsync({
+      imports: [ConfigModule],
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => ({
+        projectId: configService.get('GCP_PROJECT_ID'),
+        location: configService.get('GCP_LOCATION'),
+        defaultProcessorUrl: configService.get('PROCESSOR_URL'),
+        storageAdapter: configService.get('STORAGE_ADAPTER', 'mongo'),
+        storageOptions: {
+          mongoUri: configService.get('MONGODB_URI'),
+          collectionName: configService.get('COLLECTION_NAME', 'cloud_taskmq_tasks'),
+        },
+        autoCreateQueues: configService.get('AUTO_CREATE_QUEUES') === 'true',
+        queues: [
+          {
+            name: 'email-queue',
+            path: `projects/${configService.get('GCP_PROJECT_ID')}/locations/${configService.get('GCP_LOCATION')}/queues/email-queue`,
+            serviceAccountEmail: configService.get('SERVICE_ACCOUNT_EMAIL'),
+          },
+        ],
+      }),
+    }),
+  ],
+})
+export class AppModule {}
+```
+
 ## Task Producer: Adding Tasks to Queues
 
-### Inject the Producer Service
+## Adding Tasks to Queues
 
 ```typescript
 import { Injectable } from '@nestjs/common';
-import { ProducerService, TaskStatus } from 'nestjs-cloud-taskmq';
+import { ProducerService } from 'nestjs-cloud-taskmq';
 
 @Injectable()
 export class EmailService {
   constructor(private readonly producerService: ProducerService) {}
 
-  async sendWelcomeEmail(userId: string, email: string): Promise<void> {
+  async sendWelcomeEmail(userId: string, email: string): Promise {
     // Add a task to the email-queue
-    const result = await this.producerService.addTask(
-      'email-queue', // Queue name as registered in the module
-      {
-        type: 'welcome',
-        userId,
-        email,
-        subject: 'Welcome to our platform!',
-      },
-      {
-        // Optional: Schedule for the future
-        scheduleTime: new Date(Date.now() + 60000), // 1 minute from now
-        // Optional: Additional metadata
-        metadata: {
-          priority: 'high',
-          department: 'onboarding',
-        },
-      },
-    );
-
-    console.log(`Email task created with ID: ${result.taskId}`);
+    await this.producerService.addTask('email-queue', {
+      to: email,
+      subject: 'Welcome!',
+      template: 'welcome',
+      userId,
+    }, {
+      // Optional parameters
+      scheduleTime: new Date(Date.now() + 60000), // Run 1 minute from now
+      taskId: `welcome-${userId}`, // Custom task ID (must be unique)
+      metadata: { importance: 'high' }, // Custom metadata
+      maxRetry: 3, // Maximum number of retry attempts
+      rateLimiterKey: 'welcome-emails', // Custom rate limiter key
+      removeOnComplete: true, // Remove task from storage when completed
+      removeOnFail: false, // Keep failed tasks in storage
+    });
   }
 
-  async getEmailTaskStatus(taskId: string): Promise<string> {
-    const task = await this.producerService.getTask(taskId);
-    return task ? task.status : 'not-found';
-  }
-
-  async getFailedEmailTasks(): Promise<any[]> {
-    // Find all failed tasks in the email-queue
-    return await this.producerService.findTasks(
-      'email-queue',     // Queue name
-      TaskStatus.FAILED, // Status filter
-      10,                // Limit
-      0                  // Skip (for pagination)
-    );
-  }
-
-  async getQueueStats(): Promise<Record<string, number>> {
-    // Get count of tasks in each status for email-queue
-    return await this.producerService.getQueueStatusCounts('email-queue');
+  // Schedule a task with a custom ID that includes timestamp to avoid duplicates when retrying
+  async sendDailyDigest(userId: string, email: string): Promise {
+    const timestamp = Date.now();
+    await this.producerService.addTask('email-queue', {
+      to: email,
+      subject: 'Your Daily Digest',
+      template: 'daily-digest',
+      userId,
+    }, {
+      taskId: `daily-digest-${userId}-${timestamp}`,
+    });
   }
 }
 ```
@@ -190,37 +249,45 @@ interface EmailTaskPayload {
 @Injectable()
 @Processor('email-queue')
 export class EmailProcessor {
-  constructor(private readonly actualEmailService: YourEmailService) {}
-
-  @Process()
-  async handleEmailTask(task: CloudTask<EmailTaskPayload>): Promise<any> {
+    constructor(private readonly actualEmailService: YourEmailService) {}
+    
+    @Process()
+    async handleEmailTask(task: CloudTask<EmailTaskPayload>): Promise<any> {
     const { type, userId, email, subject, body } = task.payload;
-
+    
     // Report progress (if you have an @OnQueueProgress handler)
     await task.reportProgress(50);
-
+    
     // Send the actual email
     await this.actualEmailService.sendEmail(email, subject, body);
-
+    
     // Return a result (will be passed to @OnQueueCompleted handler)
     return { success: true, sentAt: new Date() };
-  }
-
-  @OnQueueActive()
-  onActive(task: CloudTask<EmailTaskPayload>): void {
+    }
+    
+    @OnQueueActive()
+    onActive(task: CloudTask<EmailTaskPayload>): void {
     console.log(`Processing email task ${task.taskId} for user ${task.payload.userId}`);
-  }
-
-  @OnQueueCompleted()
-  onCompleted(task: CloudTask<EmailTaskPayload>, result: any): void {
+    }
+    
+    @OnQueueCompleted()
+    onCompleted(task: CloudTask<EmailTaskPayload>, result: any): void {
     console.log(`Email task ${task.taskId} completed with result:`, result);
-  }
-
-  @OnQueueFailed()
-  onFailed(task: CloudTask<EmailTaskPayload>, error: Error): void {
+    }
+    
+    @OnQueueFailed()
+    onFailed(task: CloudTask<EmailTaskPayload>, error: Error): void {
     console.error(`Email task ${task.taskId} failed with error:`, error.message);
     // You might want to notify someone or log to a monitoring system
-  }
+    }
+
+    /**
+     * Called when progress is reported
+     */
+    @OnQueueProgress()
+    onTaskProgress(task: CloudTask<TestTaskPayload>, progress: number): void {
+        console.log(`Task ${task.taskId} progress: ${progress}%`);
+    }
 }
 ```
 
@@ -281,36 +348,175 @@ CloudTaskMQModule.forRoot({
       keyPrefix: 'my-app:', // Optional prefix for Redis keys
     },
   },
-}),
+})
 ```
 
-### Custom Storage Adapter
+## Advanced: Custom Storage Adapter
 
-You can create your own storage adapter by implementing the `IStateStorageAdapter` interface:
+You can implement your own storage adapter by implementing the `IStateStorageAdapter` interface:
 
 ```typescript
 import { Injectable } from '@nestjs/common';
-import { IStateStorageAdapter, TaskQueryOptions, ITask, TaskStatus } from 'nestjs-cloud-taskmq';
+import { IStateStorageAdapter, TaskQueryOptions, ITask, TaskStatus, IRateLimiterBucket } from 'nestjs-cloud-taskmq';
 
 @Injectable()
 export class CustomStorageAdapter implements IStateStorageAdapter {
   // Implement all required methods
-  async initialize(): Promise<void> {
-    // Initialize your storage connection
+  async initialize(): Promise {
+    // Initialize connection to your storage
   }
 
-  async createTask(task: Omit<ITask, 'createdAt' | 'updatedAt'>): Promise<ITask> {
-    // Implement task creation
+  async createTask(task: Omit): Promise {
+    // Create task in your storage
   }
 
-  // ... implement all other interface methods
-}
+  async getTaskById(taskId: string): Promise {
+    // Retrieve task from your storage
+  }
 
-// Then register it:
-{
-  provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-  useClass: CustomStorageAdapter,
+  // ... other methods from the interface
+
+  // Rate limiter bucket methods
+  async getRateLimiterBucket(key: string): Promise {
+    // Get rate limiter bucket from your storage
+  }
+
+  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise {
+    // Save rate limiter bucket to your storage
+  }
+
+  async deleteRateLimiterBucket(key: string): Promise {
+    // Delete rate limiter bucket from your storage
+  }
 }
+```
+
+Then register your custom adapter:
+
+```typescript
+import { Module } from '@nestjs/common';
+import { CloudTaskMQModule, CLOUD_TASKMQ_STORAGE_ADAPTER } from 'nestjs-cloud-taskmq';
+import { CustomStorageAdapter } from './custom-storage.adapter';
+
+@Module({
+  imports: [
+    CloudTaskMQModule.forRootAsync({
+      useFactory: () => ({
+        // ... your config
+        storageAdapter: 'custom', // This can be any string
+      }),
+      providers: [
+        {
+          provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
+          useClass: CustomStorageAdapter,
+        },
+      ],
+    }),
+  ],
+})
+export class AppModule {}
+```
+
+## Rate Limiting
+
+CloudTaskMQ provides persistent rate limiting for controlling task processing throughput. Rate limits persist across application restarts using the configured storage adapter.
+
+### 1. Queue-Level Rate Limiting
+
+Define rate limiters in the queue configuration:
+
+```typescript
+CloudTaskMQModule.forRoot({
+  // other config...
+  queues: [
+    {
+      name: 'email-queue',
+      path: 'projects/my-gcp-project/locations/us-central1/queues/email-queue',
+      rateLimiterOptions: [
+        {
+          limiterKey: 'email-queue-default', // Default limiter for this queue
+          tokens: 100, // Allow 100 operations
+          timeMS: 60000, // Per minute (60000ms)
+        }
+      ],
+    },
+  ],
+})
+```
+
+### 2. Dynamic Rate Limiters
+
+Create and use rate limiters at runtime:
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { RateLimiterService, ProducerService } from 'nestjs-cloud-taskmq';
+
+@Injectable()
+export class NotificationService {
+  constructor(
+    private readonly producerService: ProducerService,
+    private readonly rateLimiterService: RateLimiterService
+  ) {
+    // Set up rate limiters during service initialization
+    this.setupRateLimiters();
+  }
+
+  private async setupRateLimiters() {
+    // Register a rate limiter for a specific user
+    await this.rateLimiterService.registerDynamicLimiter({
+      limiterKey: 'user-123-notifications',
+      tokens: 10, // Allow 10 notifications
+      timeMS: 3600000, // Per hour (3600000ms)
+    });
+  }
+
+  async sendNotification(userId: string, message: string) {
+    // Use the rate limiter when adding a task
+    await this.producerService.addTask('notification-queue', {
+      userId,
+      message,
+    }, {
+      rateLimiterKey: `user-${userId}-notifications`,
+    });
+  }
+
+  async cleanup(userId: string) {
+    // Remove a dynamic rate limiter when no longer needed
+    await this.rateLimiterService.unregisterDynamicLimiter(`user-${userId}-notifications`);
+  }
+}
+```
+
+## Task Retries
+
+Configure automatic retries for failed tasks:
+
+```typescript
+// When adding a task
+await producerService.addTask('some-queue', payload, {
+  maxRetry: 5, // Retry up to 5 times
+});
+
+// Or in the processor
+@CloudTaskProcessor({
+  queue: 'some-queue',
+  maxRetry: 3, // Default max retries for all tasks in this processor
+})
+export class SomeProcessor {
+}
+```
+
+## Queue Auto-Creation
+
+Enable automatic creation of queues that don't exist in GCP:
+
+```typescript
+CloudTaskMQModule.forRoot({
+  // other config...
+  autoCreateQueues: true, // Will create any queues that don't exist in GCP
+  queues: [/* queue config */],
+})
 ```
 
 ## Configuration Reference
