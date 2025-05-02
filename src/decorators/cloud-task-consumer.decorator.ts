@@ -1,6 +1,7 @@
 import {applyDecorators, Controller, Post, UseGuards, UseInterceptors} from '@nestjs/common';
 import { SetMetadata } from '@nestjs/common';
 import {CloudTaskProcessorInterceptor} from "../interceptors/cloud-task-processor.interceptor";
+import {RateLimiterOptions} from "../interfaces/config.interface";
 
 /**
  * Metadata key for cloud task consumer controllers
@@ -38,6 +39,14 @@ export interface CloudTaskConsumerOptions {
    * manual calls to consumerService.processTask(). Default is true.
    */
   autoProcessTasks?: boolean;
+
+    /**
+     * Rate limiter options for controlling task processing throughput
+     * When specified, tasks will be rate-limited according to these settings
+     * This overrides any queue-level rate limiter options
+     */
+    rateLimiterOptions?: RateLimiterOptions[];
+
 }
 
 /**
@@ -75,6 +84,8 @@ export function CloudTaskConsumer(options: CloudTaskConsumerOptions = {}) {
       queues: options.queues,
       validateOidcToken: options.validateOidcToken ?? true,
       lockDurationMs: options.lockDurationMs,
+      autoProcessTasks: options.autoProcessTasks,
+      rateLimiterOptions: options.rateLimiterOptions,
     }),
   );
 }

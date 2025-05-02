@@ -71,6 +71,19 @@ export class ProducerService implements OnModuleInit {
     if (!queueConfig) {
       throw new Error(`Queue '${queueName}' is not registered with CloudTaskMQ`);
     }
+
+    // Clone the metadata to avoid modifying the original
+    const taskMetadata = options.metadata ? { ...options.metadata } : {};
+
+    // Add rate limiter key to metadata if provided
+    if (options.rateLimiterKey) {
+      taskMetadata.rateLimiterKey = options.rateLimiterKey;
+    }
+
+    // Add maxRetry to metadata if provided
+    if (options.maxRetry) {
+      taskMetadata.maxRetry = options.maxRetry;
+    }
     
     // Generate a unique task ID
     const taskId = options.taskId || uuidv4();
@@ -93,7 +106,7 @@ export class ProducerService implements OnModuleInit {
           taskId,
           queueName,
           payload,
-          metadata: options.metadata,
+          metadata: taskMetadata,
         })).toString('base64'),
       },
     };
@@ -254,5 +267,16 @@ export class ProducerService implements OnModuleInit {
     }
     
     return result;
+  }
+  /**
+   * Generate a user-specific rate limiter key
+   * This can be used to create per-user rate limits
+   *
+   * @param baseKey The base rate limiter key defined in config
+   * @param userId The user ID to limit
+   * @returns A user-specific rate limiter key
+   */
+  generateUserRateLimiterKey(baseKey: string, userId: string): string {
+    return `${baseKey}:user:${userId}`;
   }
 }

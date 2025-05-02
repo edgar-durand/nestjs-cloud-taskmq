@@ -19,8 +19,10 @@ import {
 import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
 import { CloudTask } from '../models/cloud-task.model';
-import { CloudTaskMQConfig } from '../interfaces/config.interface';
+import {CloudTaskMQConfig, RateLimiterOptions} from '../interfaces/config.interface';
 import {CLOUD_TASK_CONSUMER_KEY, CloudTaskConsumerOptions} from "../decorators/cloud-task-consumer.decorator";
+import {RateLimiterService} from "./rate-limiter.service";
+import {ProducerService} from "./producer.service";
 
 /**
  * Structure to hold discovered task processors
@@ -62,6 +64,8 @@ export class ConsumerService implements OnModuleInit {
     private readonly moduleRef: ModuleRef,
     private readonly config: CloudTaskMQConfig,
     private readonly storageAdapter: IStateStorageAdapter,
+    private readonly rateLimiterService: RateLimiterService,
+    private readonly producerService: ProducerService,
   ) {
     // Generate a unique worker ID for this instance
     this.workerId = `worker-${Math.random().toString(36).substring(2, 15)}`;
@@ -198,6 +202,195 @@ export class ConsumerService implements OnModuleInit {
   }
 
   /**
+   * Get rate limiter options based on the task's rateLimiterKey
+   * Looks through all configured rate limiters to find one matching the key
+   * Also supports dynamic rate limiters registered at runtime
+   *
+   * @param queueName The queue name
+   * @param rateLimiterKey The rate limiter key from the task
+   * @returns Matching rate limiter options or null
+   */
+  private getRateLimiterOptions(
+      queueName: string,
+      rateLimiterKey?: string
+  ): RateLimiterOptions | string | null {
+    if (!rateLimiterKey) {
+      return null; // No rate limiting if key not provided
+    }
+
+    // First check controller-level rate limiters (highest priority)
+    const queueMetadata = this.controllerMetadata?.get(queueName) || this.controllerMetadata?.get('*');
+    if (queueMetadata?.rateLimiterOptions) {
+      // Find a matching limiter by key
+      if (Array.isArray(queueMetadata.rateLimiterOptions)) {
+        const matchingLimiter = queueMetadata.rateLimiterOptions.find(
+            limiter => limiter.limiterKey === rateLimiterKey
+        );
+
+        if (matchingLimiter) {
+          this.logger.debug(`Using controller-specific rate limiter for key ${rateLimiterKey}`);
+          return matchingLimiter;
+        }
+      } else if ((queueMetadata.rateLimiterOptions as RateLimiterOptions).limiterKey === rateLimiterKey) {
+        this.logger.debug(`Using controller-specific rate limiter for key ${rateLimiterKey}`);
+        return queueMetadata.rateLimiterOptions as RateLimiterOptions;
+      }
+    }
+
+    // Then check queue-specific rate limiters
+    const queueConfig = this.config.queues.find(q => q.name === queueName);
+    if (queueConfig?.rateLimiterOptions) {
+      const matchingLimiter = queueConfig.rateLimiterOptions.find(
+          limiter => limiter.limiterKey === rateLimiterKey
+      );
+
+      if (matchingLimiter) {
+        this.logger.debug(`Using queue-specific rate limiter for key ${rateLimiterKey}`);
+        return matchingLimiter;
+      }
+    }
+
+    // Finally, check if this is a dynamic limiter key
+    // For dynamic limiters, we just return the key string and let the RateLimiterService handle it
+    if (rateLimiterKey && rateLimiterKey.includes(':')) {
+      // Only mark it as a dynamic limiter if we have a RateLimiterService available
+      if (this.rateLimiterService) {
+        this.logger.debug(`Using dynamic rate limiter with key ${rateLimiterKey}`);
+        return rateLimiterKey;
+      } else {
+        this.logger.warn(`Cannot use dynamic rate limiter with key ${rateLimiterKey} - RateLimiterService not available`);
+      }
+    }
+
+    // No matching rate limiter found
+    this.logger.debug(`No rate limiter found for key ${rateLimiterKey}`);
+    return null;
+  }
+
+  /**
+   * Re-enqueue a task with a delay when it hits a rate limit
+   * This uses the Cloud Tasks native scheduling feature to retry the task later
+   */
+  private async reEnqueueTaskWithDelay(
+      taskId: string,
+      queueName: string,
+      payload: any,
+      metadata: any,
+      waitTimeMs: number
+  ): Promise<void> {
+    try {
+      // First, get the original task to check if it's a retry
+      const originalTask = await this.storageAdapter.getTaskById(taskId);
+
+      // Release the current lock
+      await this.storageAdapter.releaseTaskLock(taskId, this.workerId);
+
+      // Extract the original task ID (before any retries)
+      let baseTaskId = taskId;
+      let retryCount = 0;
+
+      // Check if this task already has retry information
+      if (originalTask?.metadata?.retryHistory) {
+        baseTaskId = originalTask.metadata.originalTaskId || taskId;
+        retryCount = originalTask.metadata.retryCount || 0;
+      } else if (taskId.includes('-retry-')) {
+        // Parse retry count from the task ID as a fallback
+        const parts = taskId.split('-retry-');
+        baseTaskId = parts[0];
+        retryCount = parts.length - 1;
+      }
+
+      // Increment retry count
+      retryCount++;
+
+      // Get rate limiter options for this task to check max retries
+      const rateLimiterKey = metadata?.rateLimiterKey;
+      const rateLimiterOptions = this.getRateLimiterOptions(queueName, rateLimiterKey);
+
+      // Determine max retries (default to 5 if not specified)
+      // Check for maxRetry in the task's metadata
+      const maxRetry = metadata?.maxRetry ?? originalTask?.metadata?.maxRetry ?? 5;
+
+      // Check if we've exceeded max retries
+      if (retryCount > maxRetry) {
+        this.logger.warn(`Task ${baseTaskId} has exceeded maximum retries (${maxRetry}). Marking as failed.`);
+
+        // Update the task status to failed
+        await this.storageAdapter.updateTaskStatus(
+            taskId,
+            TaskStatus.FAILED,
+            {
+              metadata: {
+                ...metadata,
+                originalTaskId: baseTaskId,
+                retryCount: retryCount - 1, // Don't count this attempt since we're not retrying
+                retryHistory: [
+                  ...(originalTask?.metadata?.retryHistory || []),
+                  {
+                    timestamp: new Date(),
+                    waitTimeMs: 0,
+                    reason: 'max-retries-exceeded'
+                  }
+                ]
+              },
+              failureReason: `Rate limit exceeded after ${retryCount - 1} retries (maximum: ${maxRetry})`
+            }
+        );
+
+        this.logger.log(`Rate-limited task ${baseTaskId} failed after reaching maximum retries (${maxRetry})`);
+        return;
+      }
+
+      // Calculate new schedule time
+      const scheduleTime = new Date(Date.now() + waitTimeMs);
+
+      // Prepare retry metadata
+      const updatedMetadata = {
+        ...metadata,
+        originalTaskId: baseTaskId,
+        retryCount: retryCount,
+        maxRetry,
+        retryHistory: [
+          ...(originalTask?.metadata?.retryHistory || []),
+          {
+            timestamp: new Date(),
+            waitTimeMs,
+            reason: 'rate-limited'
+          }
+        ]
+      };
+
+      // Use a clean task ID that doesn't grow with each retry
+      const timestamp = Date.now();
+      const newTaskId = `${baseTaskId}-retry-${retryCount}-${timestamp}`;
+
+      // Update the task status to reflect that it's been rescheduled
+      if (originalTask) {
+        await this.storageAdapter.updateTaskStatus(
+            taskId,
+            TaskStatus.IDLE,
+            {
+              metadata: updatedMetadata,
+              taskId: newTaskId // Update the task ID in the document
+            }
+        );
+      }
+
+      // Create a new delayed task in Cloud Tasks (the original document is reused)
+      await this.producerService.addTask(queueName, payload, {
+        scheduleTime,
+        metadata: updatedMetadata,
+        taskId: newTaskId,
+        maxRetry // Pass the maxRetry value to the new task
+      });
+
+      this.logger.log(`Re-enqueued rate-limited task ${taskId} for queue ${queueName} with ${waitTimeMs}ms delay`);
+    } catch (error) {
+      this.logger.error(`Failed to re-enqueue rate-limited task: ${error.message}`, error.stack);
+    }
+  }
+
+  /**
    * Process a task received from Cloud Tasks
    * 
    * @param taskId ID of the task
@@ -212,6 +405,28 @@ export class ConsumerService implements OnModuleInit {
     payload: any,
     metadata?: Record<string, any>,
   ): Promise<any> {
+    // Extract rate limiter key from metadata
+    const rateLimiterKey = metadata?.rateLimiterKey;
+
+    // Get rate limiter options based on the key
+    const rateLimiterOptions = this.getRateLimiterOptions(queueName, rateLimiterKey);
+
+    // Check rate limiter if configured and we have a matching key
+    if (rateLimiterOptions && rateLimiterKey) {
+      const canProcess = await this.rateLimiterService.tryConsume(rateLimiterOptions);
+
+      if (!canProcess) {
+        // Calculate wait time
+        const waitTimeMs = await this.rateLimiterService.getWaitTimeMs(rateLimiterOptions);
+
+        // Re-enqueue task with delay
+        await this.reEnqueueTaskWithDelay(taskId, queueName, payload, metadata, waitTimeMs);
+        this.logger.warn(`Rate limited task ${taskId} for queue ${queueName} with key "${rateLimiterKey}", will retry in ${waitTimeMs}ms`);
+        return;
+      }
+    }
+
+
     // Find the appropriate processor for this queue
     const processor = this.processors.get(queueName);
     if (!processor) {
@@ -357,9 +572,19 @@ export class ConsumerService implements OnModuleInit {
       
       // Log the error
       this.logger.error(`Error processing task ${taskId}: ${failureReason}`, error.stack);
-      
-      // Re-throw the error to let Cloud Tasks handle the retry policy
-      throw error;
+
+      // Get the maxRetry value from metadata or use default
+      const maxRetry = metadata?.maxRetry ?? 5; // Default to 5 if not specified
+      const currentRetryCount = (taskRecord.retryCount || 0) + 1;
+
+      // Only re-throw the error (causing Cloud Tasks to retry) if we haven't exceeded maxRetry
+      if (currentRetryCount <= maxRetry) {
+        this.logger.debug(`Retry ${currentRetryCount}/${maxRetry} for task ${taskId}`);
+        throw error;
+      } else {
+        this.logger.warn(`Task ${taskId} exceeded maximum retry attempts (${maxRetry}). Not retrying.`);
+        return { success: false, error: failureReason, maxRetryExceeded: true };
+      }
     }
   }
 }

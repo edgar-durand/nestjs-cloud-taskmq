@@ -1,6 +1,27 @@
 import { ModuleMetadata, Type } from '@nestjs/common';
 
 /**
+ * Rate limiter options for controlling task processing throughput
+ */
+export interface RateLimiterOptions {
+  /**
+   * Unique key for the rate limiter
+   * Tasks with the same limiterKey will share the rate limit
+   */
+  limiterKey: string;
+
+  /**
+   * Number of tokens (operations) allowed in the time window
+   */
+  tokens: number;
+
+  /**
+   * Time window in milliseconds for token consumption
+   */
+  timeMS: number;
+}
+
+/**
  * Configuration for a Cloud Tasks queue
  */
 export interface QueueConfig {
@@ -29,6 +50,12 @@ export interface QueueConfig {
    * Overrides the global lockDurationMs when specified
    */
   lockDurationMs?: number;
+
+  /**
+   * Rate limiter options for this queue
+   * Controls how many tasks can be processed in a time window
+   */
+  rateLimiterOptions?: RateLimiterOptions[];
 }
 
 /**

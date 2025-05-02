@@ -4,13 +4,15 @@ export { CloudTaskMQModule } from './cloud-taskmq.module';
 // Services
 export { ProducerService } from './services/producer.service';
 export { ConsumerService } from './services/consumer.service';
+export { RateLimiterService } from './services/rate-limiter.service';
 
 // Interfaces
 export { 
   CloudTaskMQConfig, 
   CloudTaskMQAsyncConfig, 
   CloudTaskMQConfigFactory,
-  QueueConfig
+  QueueConfig,
+  RateLimiterOptions
 } from './interfaces/config.interface';
 export { 
   IStateStorageAdapter, 

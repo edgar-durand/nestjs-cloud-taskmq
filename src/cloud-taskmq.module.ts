@@ -22,6 +22,7 @@ import { IStateStorageAdapter } from './interfaces/storage-adapter.interface';
 import {Connection, Model} from "mongoose";
 import {ITask} from "./interfaces/task.interface";
 import {CloudTaskProcessorInterceptor} from "./interceptors/cloud-task-processor.interceptor";
+import {RateLimiterService} from "./services/rate-limiter.service";
 
 /**
  * Main module for CloudTaskMQ. Use forRoot or forRootAsync to configure and register.
@@ -101,10 +102,11 @@ export class CloudTaskMQModule {
         configProvider,
         ProducerService,
         ConsumerService,
+        RateLimiterService,
         CloudTaskProcessorInterceptor,
         createStorageAdapterProvider(config),
       ],
-      exports: [ProducerService, ConsumerService],
+      exports: [ProducerService, ConsumerService, RateLimiterService],
     };
   }
 
@@ -199,14 +201,18 @@ export class CloudTaskMQModule {
           metadataScanner: MetadataScanner,
           moduleRef: ModuleRef,
           config: CloudTaskMQConfig,
-          storageAdapter: IStateStorageAdapter
+          storageAdapter: IStateStorageAdapter,
+          rateLimiterService: RateLimiterService,
+          producerService: ProducerService
         ) => {
           return new ConsumerService(
             discoveryService,
             metadataScanner,
             moduleRef,
             config,
-            storageAdapter
+            storageAdapter,
+            rateLimiterService,
+            producerService
           );
         },
         inject: [
@@ -214,7 +220,9 @@ export class CloudTaskMQModule {
           MetadataScanner,
           ModuleRef,
           CLOUD_TASKMQ_CONFIG,
-          CLOUD_TASKMQ_STORAGE_ADAPTER
+          CLOUD_TASKMQ_STORAGE_ADAPTER,
+          RateLimiterService,
+          ProducerService,
         ],
       }
     ];
@@ -317,6 +325,7 @@ export class CloudTaskMQModule {
     });
 
     providers.push(CloudTaskProcessorInterceptor);
+    providers.push(RateLimiterService);
 
     return {
       module: CloudTaskMQModule,
@@ -324,7 +333,7 @@ export class CloudTaskMQModule {
       imports,
       controllers: [TaskController],
       providers,
-      exports: [ProducerService, ConsumerService],
+      exports: [ProducerService, ConsumerService, RateLimiterService],
     };
   }
 

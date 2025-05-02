@@ -1,4 +1,49 @@
 /**
+ * Represents a retry history entry
+ */
+export interface RetryHistoryEntry {
+  /**
+   * When the retry happened
+   */
+  timestamp: Date;
+
+  /**
+   * How long the task was delayed before retrying
+   */
+  waitTimeMs: number;
+
+  /**
+   * Reason for the retry
+   */
+  reason: string;
+}
+
+/**
+ * Metadata for tasks with retry information
+ */
+export interface TaskMetadata {
+  /**
+   * ID of the original task (before any retries)
+   */
+  originalTaskId?: string;
+
+  /**
+   * Number of times this task has been retried
+   */
+  retryCount?: number;
+
+  /**
+   * History of retries for this task
+   */
+  retryHistory?: RetryHistoryEntry[];
+
+  /**
+   * Any other metadata as key-value pairs
+   */
+  [key: string]: any;
+}
+
+/**
  * Represents the status of a task in the queue system
  */
 export enum TaskStatus {
@@ -75,7 +120,7 @@ export interface ITask {
   /**
    * Any additional metadata for the task
    */
-  metadata?: Record<string, any>;
+  metadata?: TaskMetadata;
 
   /**
    * When the document should be automatically removed by MongoDB TTL index
@@ -119,6 +164,20 @@ export interface AddTaskOptions {
    * If set to false or not provided, the task will remain in storage.
    */
   removeOnFail?: boolean | number;
+
+  /**
+   * Custom rate limiter key for this task
+   * This can be used to group tasks for rate limiting purposes
+   * this key must exist in the rate limiter configuration for the queue it's added to
+   */
+  rateLimiterKey?: string;
+
+  /**
+   * Maximum number of retries for rate-limited tasks
+   * After this many retries, the task will be marked as failed
+   * Default: 5
+   */
+  maxRetry?: number;
 }
 
 /**

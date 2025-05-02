@@ -101,6 +101,8 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
         this.taskModel.collection.createIndex({ queueName: 1, status: 1 }),
         this.taskModel.collection.createIndex({ status: 1 }),
         this.taskModel.collection.createIndex({ createdAt: 1 }),
+        this.taskModel.collection.createIndex({ 'metadata.originalTaskId': 1 }),
+        this.taskModel.collection.createIndex({ 'metadata.retryCount': 1 }),
         this.taskModel.collection.createIndex({ lockedUntil: 1 }, { sparse: true }),
       ];
 
