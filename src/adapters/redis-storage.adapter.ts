@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { IStateStorageAdapter, TaskQueryOptions } from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
 import { Redis } from 'ioredis';
+import {IRateLimiterBucket} from "../interfaces/rate-limiter.interface";
 
 /**
  * Redis storage adapter for CloudTaskMQ
@@ -502,6 +503,75 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
       }));
 
       this.logger.log(`Set Redis TTL for task ${task.taskId} to expire in ${removeOption} seconds`);
+    }
+  }
+
+  /**
+   * Generate a Redis key for a rate limiter bucket
+   */
+  private getRateLimiterKey(key: string): string {
+    return `${this.keyPrefix}rate-limiter:${key}`;
+  }
+
+  /**
+   * Get a rate limiter bucket by its key
+   * @param key The unique key for the rate limiter bucket
+   */
+  async getRateLimiterBucket(key: string): Promise<IRateLimiterBucket | null> {
+    try {
+      const bucketKey = this.getRateLimiterKey(key);
+      const data = await this.client.get(bucketKey);
+
+      if (!data) {
+        return null;
+      }
+
+      return JSON.parse(data) as IRateLimiterBucket;
+    } catch (error) {
+      this.logger.error(`Error getting rate limiter bucket: ${error.message}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Save a rate limiter bucket
+   * @param bucket The rate limiter bucket to save
+   */
+  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise<IRateLimiterBucket> {
+    try {
+      const bucketKey = this.getRateLimiterKey(bucket.key);
+      const now = new Date();
+
+      const updatedBucket: IRateLimiterBucket = {
+        ...bucket,
+        updatedAt: now,
+        createdAt: bucket.createdAt || now
+      };
+
+      await this.client.set(
+          bucketKey,
+          JSON.stringify(updatedBucket)
+      );
+
+      return updatedBucket;
+    } catch (error) {
+      this.logger.error(`Error saving rate limiter bucket: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a rate limiter bucket
+   * @param key The key of the bucket to delete
+   */
+  async deleteRateLimiterBucket(key: string): Promise<boolean> {
+    try {
+      const bucketKey = this.getRateLimiterKey(key);
+      const result = await this.client.del(bucketKey);
+      return result > 0;
+    } catch (error) {
+      this.logger.error(`Error deleting rate limiter bucket: ${error.message}`, error.stack);
+      return false;
     }
   }
 }

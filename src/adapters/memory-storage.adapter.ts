@@ -1,6 +1,7 @@
 import {Injectable, Logger} from '@nestjs/common';
 import { IStateStorageAdapter, TaskQueryOptions } from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
+import {IRateLimiterBucket} from "../interfaces/rate-limiter.interface";
 
 /**
  * In-memory storage adapter for CloudTaskMQ
@@ -11,6 +12,7 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
   private tasks: Map<string, ITask & { lockedBy?: string; lockedUntil?: Date }> = new Map();
   private readonly logger = new Logger(MemoryStorageAdapter.name);
   private cleanupTimeouts: Map<string, NodeJS.Timeout> = new Map();
+  private rateLimiterBuckets: Map<string, IRateLimiterBucket> = new Map();
 
   /**
    * Initialize the storage adapter
@@ -352,5 +354,37 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
       this.cleanupTimeouts.set(task.taskId, timeout);
       this.logger.log(`Scheduled removal of task ${task.taskId} in ${removeOption} seconds`);
     }
+  }
+
+  /**
+   * Get a rate limiter bucket by its key
+   * @param key The unique key for the rate limiter bucket
+   */
+  async getRateLimiterBucket(key: string): Promise<IRateLimiterBucket | null> {
+    return this.rateLimiterBuckets.get(key) || null;
+  }
+
+  /**
+   * Save a rate limiter bucket
+   * @param bucket The rate limiter bucket to save
+   */
+  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise<IRateLimiterBucket> {
+    const now = new Date();
+    const updatedBucket: IRateLimiterBucket = {
+      ...bucket,
+      updatedAt: now,
+      createdAt: bucket.createdAt || now
+    };
+
+    this.rateLimiterBuckets.set(bucket.key, updatedBucket);
+    return updatedBucket;
+  }
+
+  /**
+   * Delete a rate limiter bucket
+   * @param key The key of the bucket to delete
+   */
+  async deleteRateLimiterBucket(key: string): Promise<boolean> {
+    return this.rateLimiterBuckets.delete(key);
   }
 }

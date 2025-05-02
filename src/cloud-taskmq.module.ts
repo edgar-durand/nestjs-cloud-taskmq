@@ -224,108 +224,105 @@ export class CloudTaskMQModule {
           RateLimiterService,
           ProducerService,
         ],
+      },
+      {
+        provide: RateLimiterService,
+        useFactory: (storageAdapter: IStateStorageAdapter) => {
+          return new RateLimiterService(storageAdapter);
+        },
+        inject: [CLOUD_TASKMQ_STORAGE_ADAPTER],
+      },
+      {
+        provide: 'MONGODB_OPTIONS_FACTORY',
+        useFactory: (config: CloudTaskMQConfig) => {
+          if (config.storageAdapter === 'mongo') {
+            return {
+              uri: config.storageOptions.mongoUri,
+              collectionName: config.storageOptions.collectionName || 'cloud_taskmq_tasks'
+            };
+          }
+          return null;
+        },
+        inject: [CLOUD_TASKMQ_CONFIG],
+      },
+      {
+        provide: 'MONGODB_CONNECTION_SETUP',
+        useFactory: (config: CloudTaskMQConfig, mongoOptions: any) => {
+          if (config.storageAdapter === 'mongo' && mongoOptions) {
+            // Add MongoDB modules to imports
+            imports.push(
+                MongooseModule.forRoot(mongoOptions.uri),
+                MongooseModule.forFeature([
+                  {
+                    name: 'CloudTaskMQTask',
+                    schema: TaskSchema,
+                    collection: mongoOptions.collectionName
+                  }
+                ])
+            );
+          }
+          return true;
+        },
+        inject: [CLOUD_TASKMQ_CONFIG, 'MONGODB_OPTIONS_FACTORY'],
+      },
+      {
+        provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
+        useFactory: async (config: CloudTaskMQConfig, connection: Connection, model: Model<ITask>) => {
+          const { storageAdapter, storageOptions } = config;
+          let adapter: IStateStorageAdapter;
+
+          console.log(`Creating adapter with storageAdapter=${storageAdapter}, connection=${!!connection}, model=${!!model}`);
+
+          switch (storageAdapter) {
+            case 'mongo':
+              adapter = new MongoStorageAdapter(
+                  connection,
+                  model,
+                  storageOptions.collectionName
+              );
+
+              if (connection && adapter instanceof MongoStorageAdapter) {
+                // Do any additional setup for MongoDB adapter if needed
+              }
+              break;
+            case 'redis':
+              adapter = new RedisStorageAdapter({
+                host: storageOptions.redis?.host,
+                port: storageOptions.redis?.port,
+                password: storageOptions.redis?.password,
+                url: storageOptions.redis?.url,
+                keyPrefix: storageOptions.redis?.keyPrefix,
+              });
+              break;
+            case 'memory':
+              adapter = new MemoryStorageAdapter();
+              break;
+            default:
+              throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
+          }
+
+          // Initialize the adapter
+          try {
+            await adapter.initialize();
+            console.log(`Successfully initialized ${storageAdapter} adapter`);
+          } catch (error) {
+            console.error(`Error initializing ${storageAdapter} adapter:`, error.message);
+          }
+
+          return adapter;
+        },
+        inject: [
+          CLOUD_TASKMQ_CONFIG,
+          { token: getConnectionToken(), optional: true },
+          { token: getModelToken('CloudTaskMQTask'), optional: true }
+        ],
       }
     ];
 
     // Setup base imports - every configuration needs DiscoveryModule
     const imports = [DiscoveryModule, ...(asyncConfig.imports || [])];
 
-    // Create a special MongoDB configuration factory
-    const mongoConfigFactory = {
-      provide: 'MONGODB_OPTIONS_FACTORY',
-      useFactory: (config: CloudTaskMQConfig) => {
-        if (config.storageAdapter === 'mongo') {
-          return {
-            uri: config.storageOptions.mongoUri,
-            collectionName: config.storageOptions.collectionName || 'cloud_taskmq_tasks'
-          };
-        }
-        return null;
-      },
-      inject: [CLOUD_TASKMQ_CONFIG],
-    };
-
-    // Add MongoDB factory to providers
-    providers.push(mongoConfigFactory);
-
-    // MongoDB connection setup provider
-    providers.push({
-      provide: 'MONGODB_CONNECTION_SETUP',
-      useFactory: (config: CloudTaskMQConfig, mongoOptions: any) => {
-        if (config.storageAdapter === 'mongo' && mongoOptions) {
-          // Add MongoDB modules to imports
-          imports.push(
-              MongooseModule.forRoot(mongoOptions.uri),
-              MongooseModule.forFeature([
-                {
-                  name: 'CloudTaskMQTask',
-                  schema: TaskSchema,
-                  collection: mongoOptions.collectionName
-                }
-              ])
-          );
-        }
-        return true;
-      },
-      inject: [CLOUD_TASKMQ_CONFIG, 'MONGODB_OPTIONS_FACTORY'],
-    });
-
-    // Properly configure StorageAdapter with initialization
-    providers.push({
-      provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-      useFactory: async (config: CloudTaskMQConfig, connection: Connection, model: Model<ITask>) => {
-        const { storageAdapter, storageOptions } = config;
-        let adapter: IStateStorageAdapter;
-
-        console.log(`Creating adapter with storageAdapter=${storageAdapter}, connection=${!!connection}, model=${!!model}`);
-
-        switch (storageAdapter) {
-          case 'mongo':
-            adapter = new MongoStorageAdapter(
-                connection,
-                model,
-                storageOptions.collectionName
-            );
-
-            if (connection && adapter instanceof MongoStorageAdapter) {
-              // Do any additional setup for MongoDB adapter if needed
-            }
-            break;
-          case 'redis':
-            adapter = new RedisStorageAdapter({
-              host: storageOptions.redis?.host,
-              port: storageOptions.redis?.port,
-              password: storageOptions.redis?.password,
-              url: storageOptions.redis?.url,
-              keyPrefix: storageOptions.redis?.keyPrefix,
-            });
-            break;
-          case 'memory':
-            adapter = new MemoryStorageAdapter();
-            break;
-          default:
-            throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
-        }
-
-        // Initialize the adapter
-        try {
-          await adapter.initialize();
-          console.log(`Successfully initialized ${storageAdapter} adapter`);
-        } catch (error) {
-          console.error(`Error initializing ${storageAdapter} adapter:`, error.message);
-        }
-
-        return adapter;
-      },
-      inject: [
-        CLOUD_TASKMQ_CONFIG,
-        { token: getConnectionToken(), optional: true },
-        { token: getModelToken('CloudTaskMQTask'), optional: true }
-      ],
-    });
-
     providers.push(CloudTaskProcessorInterceptor);
-    providers.push(RateLimiterService);
 
     return {
       module: CloudTaskMQModule,

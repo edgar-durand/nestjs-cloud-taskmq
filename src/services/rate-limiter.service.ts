@@ -1,6 +1,8 @@
 // src/services/rate-limiter.service.ts
-import { Injectable, Logger } from '@nestjs/common';
+import {Inject, Injectable, Logger} from '@nestjs/common';
 import { RateLimiterOptions } from '../interfaces/config.interface';
+import {CLOUD_TASKMQ_STORAGE_ADAPTER} from "../utils/constants";
+import {IStateStorageAdapter} from "../interfaces/storage-adapter.interface";
 
 interface TokenBucket {
     tokens: number;
@@ -15,6 +17,10 @@ export class RateLimiterService {
     private readonly buckets: Map<string, TokenBucket> = new Map();
     private readonly dynamicLimiters: Map<string, RateLimiterOptions> = new Map();
 
+    constructor(
+      @Inject(CLOUD_TASKMQ_STORAGE_ADAPTER)
+      private readonly storageAdapter: IStateStorageAdapter
+    ) {}
   /**
    * Try to consume tokens for a specific rate limiter key
    * Works with both configured limiters and dynamic limiters
@@ -45,16 +51,19 @@ export class RateLimiterService {
       timeMS = options.timeMS;
     }
 
-    // Get or create bucket
-    let bucket = this.buckets.get(limiterKey);
+    // Get bucket from storage or create new one
+    let bucket = await this.storageAdapter.getRateLimiterBucket(limiterKey);
     if (!bucket) {
+      // Create a new bucket if none exists
       bucket = {
+        key: limiterKey,
         tokens,
         lastRefill: Date.now(),
         maxTokens: tokens,
         refillTimeMs: timeMS
       };
-      this.buckets.set(limiterKey, bucket);
+
+      await this.storageAdapter.saveRateLimiterBucket(bucket);
       return true;
     }
 
@@ -65,10 +74,16 @@ export class RateLimiterService {
     if (bucket.tokens >= 1) { // Always consume 1 token per task
       bucket.tokens -= 1;
       this.logger.debug(`Consumed 1 token for key ${limiterKey}, ${bucket.tokens} remaining`);
+
+      // Save the updated bucket
+      await this.storageAdapter.saveRateLimiterBucket(bucket);
       return true;
     }
 
     this.logger.debug(`Rate limit exceeded for key ${limiterKey}, available: ${bucket.tokens}`);
+
+    // Save the refilled bucket even though we didn't consume a token
+    await this.storageAdapter.saveRateLimiterBucket(bucket);
     return false;
   }
 

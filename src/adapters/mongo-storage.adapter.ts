@@ -3,6 +3,7 @@ import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Schema } from 'mongoose';
 import { IStateStorageAdapter, TaskQueryOptions } from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
+import {IRateLimiterBucket} from "../interfaces/rate-limiter.interface";
 
 /**
  * MongoDB schema for task documents
@@ -33,11 +34,31 @@ export const TaskSchema = new Schema<ITask>(
   }
 );
 
+/**
+ * MongoDB schema for rate limiter buckets
+ */
+export const RateLimiterBucketSchema = new Schema<IRateLimiterBucket>(
+    {
+      key: { type: String, required: true, unique: true, index: true },
+      tokens: { type: Number, required: true },
+      lastRefill: { type: Number, required: true },
+      maxTokens: { type: Number, required: true },
+      refillTimeMs: { type: Number, required: true },
+    },
+    {
+      timestamps: true,
+      collection: 'cloud_taskmq_rate_limiters',
+    }
+);
+
+
 @Injectable()
 export class MongoStorageAdapter implements IStateStorageAdapter {
   private readonly logger = new Logger(MongoStorageAdapter.name);
   private collectionName: string;
   private taskModel: Model<ITask>;
+  private rateLimiterModel: Model<IRateLimiterBucket>;
+
 
   constructor(
       @InjectConnection() private connection?: Connection,
@@ -74,6 +95,22 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
       }
 
       this.collectionName = collName;
+
+      const rateLimiterCollName = this.customCollectionName
+          ? `${this.customCollectionName}_rate_limiters`
+          : 'cloud_taskmq_rate_limiters';
+
+      if (this.connection.models['CloudTaskMQRateLimiter']) {
+        this.logger.debug('Rate limiter model already exists on connection, reusing it');
+        this.rateLimiterModel = this.connection.models['CloudTaskMQRateLimiter'];
+      } else {
+        this.logger.debug('Creating new rate limiter model with schema');
+        this.rateLimiterModel = this.connection.model<IRateLimiterBucket>(
+            'CloudTaskMQRateLimiter',
+            RateLimiterBucketSchema,
+            rateLimiterCollName
+        );
+      }
     } else {
       this.logger.warn('MongoStorageAdapter created without connection or model!');
     }
@@ -405,6 +442,65 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
       } catch (error) {
         this.logger.error(`Error setting TTL for task ${task.taskId}: ${error.message}`);
       }
+    }
+  }
+
+  /**
+   * Get a rate limiter bucket by its key
+   * @param key The unique key for the rate limiter bucket
+   */
+  async getRateLimiterBucket(key: string): Promise<IRateLimiterBucket | null> {
+    if (!this.rateLimiterModel) {
+      this.logger.warn('getRateLimiterBucket called but rateLimiterModel is not initialized');
+      return null;
+    }
+
+    try {
+      return this.rateLimiterModel.findOne({ key }).lean().exec();
+    } catch (error) {
+      this.logger.error(`Error getting rate limiter bucket: ${error.message}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Save a rate limiter bucket
+   * @param bucket The rate limiter bucket to save
+   */
+  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise<IRateLimiterBucket> {
+    if (!this.rateLimiterModel) {
+      this.logger.warn('saveRateLimiterBucket called but rateLimiterModel is not initialized');
+      throw new Error('Rate limiter model not initialized');
+    }
+
+    try {
+      return this.rateLimiterModel.findOneAndUpdate(
+          { key: bucket.key },
+          bucket,
+          { new: true, upsert: true }
+      ).lean().exec();
+    } catch (error) {
+      this.logger.error(`Error saving rate limiter bucket: ${error.message}`, error.stack);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a rate limiter bucket
+   * @param key The key of the bucket to delete
+   */
+  async deleteRateLimiterBucket(key: string): Promise<boolean> {
+    if (!this.rateLimiterModel) {
+      this.logger.warn('deleteRateLimiterBucket called but rateLimiterModel is not initialized');
+      return false;
+    }
+
+    try {
+      const result = await this.rateLimiterModel.deleteOne({ key }).exec();
+      return result.deletedCount > 0;
+    } catch (error) {
+      this.logger.error(`Error deleting rate limiter bucket: ${error.message}`, error.stack);
+      return false;
     }
   }
 }

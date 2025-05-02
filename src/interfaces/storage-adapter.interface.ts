@@ -1,4 +1,5 @@
 import { ITask, TaskStatus } from './task.interface';
+import { IRateLimiterBucket } from "./rate-limiter.interface";
 
 /**
  * Options for querying tasks
@@ -104,4 +105,24 @@ export interface IStateStorageAdapter {
 
   completeTask(taskId: string, result?: any): Promise<ITask>;
   failTask(taskId: string, error: any): Promise<ITask>;
+
+  // Rate limiter methods
+  /**
+   * Get a rate limiter bucket by its key
+   * @param key The unique key for the rate limiter bucket
+   */
+  getRateLimiterBucket(key: string): Promise<IRateLimiterBucket | null>;
+
+  /**
+   * Save a rate limiter bucket
+   * @param bucket The rate limiter bucket to save
+   */
+  saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise<IRateLimiterBucket>;
+
+  /**
+   * Delete a rate limiter bucket
+   * @param key The key of the bucket to delete
+   */
+  deleteRateLimiterBucket(key: string): Promise<boolean>;
+
 }
