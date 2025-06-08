@@ -1,26 +1,32 @@
 // src/services/rate-limiter.service.ts
-import {Inject, Injectable, Logger} from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { RateLimiterOptions } from '../interfaces/config.interface';
-import {CLOUD_TASKMQ_STORAGE_ADAPTER} from "../utils/constants";
-import {IStateStorageAdapter} from "../interfaces/storage-adapter.interface";
+import { CLOUD_TASKMQ_STORAGE_ADAPTER } from '../utils/constants';
+import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
 
 interface TokenBucket {
-    tokens: number;
-    lastRefill: number;
-    maxTokens: number;
-    refillTimeMs: number;
+  key: string;
+  tokens: number;
+  lastRefill: number;
+  maxTokens: number;
+  refillTimeMs: number;
 }
+
+const MAX_CACHE_SIZE = 1000;
+const CACHE_TTL = 10 * 60 * 1000;
 
 @Injectable()
 export class RateLimiterService {
-    private readonly logger = new Logger(RateLimiterService.name);
-    private readonly buckets: Map<string, TokenBucket> = new Map();
-    private readonly dynamicLimiters: Map<string, RateLimiterOptions> = new Map();
+  private readonly logger = new Logger(RateLimiterService.name);
+  private readonly dynamicLimiters: Map<string, RateLimiterOptions> = new Map();
+  // Use a Map with time-based expiration
+  private readonly buckets: Map<string, { data: TokenBucket; expiry: number }> =
+    new Map();
 
-    constructor(
-      @Inject(CLOUD_TASKMQ_STORAGE_ADAPTER)
-      private readonly storageAdapter: IStateStorageAdapter
-    ) {}
+  constructor(
+    @Inject(CLOUD_TASKMQ_STORAGE_ADAPTER)
+    private readonly storageAdapter: IStateStorageAdapter,
+  ) {}
   /**
    * Try to consume tokens for a specific rate limiter key
    * Works with both configured limiters and dynamic limiters
@@ -51,39 +57,56 @@ export class RateLimiterService {
       timeMS = options.timeMS;
     }
 
-    // Get bucket from storage or create new one
-    let bucket = await this.storageAdapter.getRateLimiterBucket(limiterKey);
+    // Check cache first
+    let bucket = this.getBucketFromCache(limiterKey);
+    // If not in cache, get from storage
     if (!bucket) {
-      // Create a new bucket if none exists
-      bucket = {
-        key: limiterKey,
-        tokens,
-        lastRefill: Date.now(),
-        maxTokens: tokens,
-        refillTimeMs: timeMS
-      };
+      bucket = await this.storageAdapter.getRateLimiterBucket(limiterKey);
 
-      await this.storageAdapter.saveRateLimiterBucket(bucket);
-      return true;
+      if (!bucket) {
+        // Create a new bucket if none exists
+        bucket = {
+          key: limiterKey,
+          tokens,
+          lastRefill: Date.now(),
+          maxTokens: tokens,
+          refillTimeMs: timeMS,
+        };
+
+        // Save to storage
+        await this.storageAdapter.saveRateLimiterBucket(bucket);
+        // Cache the new bucket
+        this.setCachedBucket(limiterKey, bucket);
+        return true;
+      }
     }
 
     // Refill tokens based on elapsed time
     this.refillBucket(bucket);
 
     // Check if enough tokens are available
-    if (bucket.tokens >= 1) { // Always consume 1 token per task
+    if (bucket.tokens >= 1) {
+      // Always consume 1 token per task
       bucket.tokens -= 1;
-      this.logger.debug(`Consumed 1 token for key ${limiterKey}, ${bucket.tokens} remaining`);
+      this.logger.debug(
+        `Consumed 1 token for key ${limiterKey}, ${bucket.tokens} remaining`,
+      );
 
       // Save the updated bucket
       await this.storageAdapter.saveRateLimiterBucket(bucket);
+      // Update cache with the modified bucket
+      this.setCachedBucket(limiterKey, bucket);
       return true;
     }
 
-    this.logger.debug(`Rate limit exceeded for key ${limiterKey}, available: ${bucket.tokens}`);
+    this.logger.debug(
+      `Rate limit exceeded for key ${limiterKey}, available: ${bucket.tokens}`,
+    );
 
     // Save the refilled bucket even though we didn't consume a token
     await this.storageAdapter.saveRateLimiterBucket(bucket);
+    // Update cache with the refilled bucket
+    this.setCachedBucket(limiterKey, bucket);
     return false;
   }
 
@@ -104,7 +127,16 @@ export class RateLimiterService {
       limiterKey = options.limiterKey;
     }
 
-    const bucket = this.buckets.get(limiterKey);
+    // Check cache first
+    let bucket = this.getBucketFromCache(limiterKey);
+    // If not in cache, get from storage
+    if (!bucket) {
+      bucket = await this.storageAdapter.getRateLimiterBucket(limiterKey);
+      if (bucket) {
+        // Cache the bucket for future use
+        this.setCachedBucket(limiterKey, bucket);
+      }
+    }
 
     if (!bucket || bucket.tokens >= 1) {
       return 0;
@@ -151,15 +183,22 @@ export class RateLimiterService {
    */
   registerDynamicLimiter(options: RateLimiterOptions): boolean {
     const { limiterKey } = options;
+    try {
+      if (this.dynamicLimiters.has(limiterKey)) {
+        this.logger.debug(
+          `Dynamic rate limiter with key '${limiterKey}' already exists`,
+        );
+        return false;
+      }
 
-    if (this.dynamicLimiters.has(limiterKey)) {
-      this.logger.debug(`Dynamic rate limiter with key '${limiterKey}' already exists`);
+      this.dynamicLimiters.set(limiterKey, options);
+      this.logger.log(
+        `Registered dynamic rate limiter with key '${limiterKey}'`,
+      );
+      return true;
+    } catch {
       return false;
     }
-
-    this.dynamicLimiters.set(limiterKey, options);
-    this.logger.log(`Registered dynamic rate limiter with key '${limiterKey}'`);
-    return true;
   }
 
   /**
@@ -170,13 +209,53 @@ export class RateLimiterService {
    * @returns True if unregistered, false if limiter not found
    */
   unregisterDynamicLimiter(limiterKey: string): boolean {
-    if (!this.dynamicLimiters.has(limiterKey)) {
+    try {
+      if (!this.dynamicLimiters.has(limiterKey)) {
+        return false;
+      }
+
+      this.dynamicLimiters.delete(limiterKey);
+
+      // Also remove from cache
+      this.buckets.delete(limiterKey);
+
+      // Asynchronously delete from storage but don't await
+      this.storageAdapter
+        .deleteRateLimiterBucket(limiterKey)
+        .catch((err) =>
+          this.logger.error(
+            `Failed to delete rate limiter bucket: ${err.message}`,
+          ),
+        );
+
+      this.logger.log(
+        `Unregistered dynamic rate limiter with key '${limiterKey}'`,
+      );
+      return true;
+    } catch (e) {
       return false;
     }
+  }
 
-    this.dynamicLimiters.delete(limiterKey);
-    this.buckets.delete(limiterKey);
-    this.logger.log(`Unregistered dynamic rate limiter with key '${limiterKey}'`);
-    return true;
+  private getBucketFromCache(key: string): TokenBucket | null {
+    const cached = this.buckets.get(key);
+    if (cached && cached.expiry > Date.now()) {
+      return cached.data;
+    }
+    // Remove expired entry
+    if (cached) this.buckets.delete(key);
+    return null;
+  }
+
+  private setCachedBucket(key: string, bucket: TokenBucket): void {
+    // 10-minute TTL
+    this.buckets.set(key, { data: bucket, expiry: Date.now() + CACHE_TTL });
+
+    // Optionally enforce a maximum cache size
+    if (this.buckets.size > MAX_CACHE_SIZE) {
+      // Remove oldest entries
+      const keysToDelete = [...this.buckets.keys()].slice(0, 100);
+      keysToDelete.forEach((k) => this.buckets.delete(k));
+    }
   }
 }

@@ -5,31 +5,39 @@ import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
 import { MongoStorageAdapter } from '../adapters/mongo-storage.adapter';
 import { RedisStorageAdapter } from '../adapters/redis-storage.adapter';
 import { MemoryStorageAdapter } from '../adapters/memory-storage.adapter';
-import { getModelToken, getConnectionToken } from '@nestjs/mongoose';
+import { getConnectionToken } from '@nestjs/mongoose';
+import {
+  CUSTOM_STORAGE_ADAPTER,
+  MEMORY_STORAGE_ADAPTER,
+  MONGO_STORAGE_ADAPTER,
+  REDIS_STORAGE_ADAPTER,
+} from '../adapters/types';
 
 /**
  * Creates the appropriate storage adapter provider based on the configuration
- * 
- * @param config CloudTaskMQ configuration
+ *
  * @returns Provider for the storage adapter
  */
-export function createStorageAdapterProvider(config: CloudTaskMQConfig): Provider {
+export function createStorageAdapterProvider(): Provider {
   return {
     provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-    useFactory: async (config: CloudTaskMQConfig, connection: any, taskModel: any): Promise<IStateStorageAdapter> => {
-      const { storageAdapter, storageOptions } = config;
+    useFactory: async (
+      config: CloudTaskMQConfig,
+      connection: any,
+    ): Promise<IStateStorageAdapter> => {
+      const { storageAdapter, storageOptions, customStorageAdapterInstance } =
+        config;
       let adapter: IStateStorageAdapter;
 
       // Create the appropriate storage adapter based on configuration
       switch (storageAdapter) {
-        case 'mongo':
+        case MONGO_STORAGE_ADAPTER:
           adapter = new MongoStorageAdapter(
-              connection,
-              taskModel,
-              storageOptions.collectionName
+            connection,
+            storageOptions.collectionName,
           );
           break;
-        case 'redis':
+        case REDIS_STORAGE_ADAPTER:
           adapter = new RedisStorageAdapter({
             host: storageOptions.redis?.host,
             port: storageOptions.redis?.port,
@@ -38,8 +46,16 @@ export function createStorageAdapterProvider(config: CloudTaskMQConfig): Provide
             keyPrefix: storageOptions.redis?.keyPrefix,
           });
           break;
-        case 'memory':
+        case MEMORY_STORAGE_ADAPTER:
           adapter = new MemoryStorageAdapter();
+          break;
+        case CUSTOM_STORAGE_ADAPTER:
+          if (!customStorageAdapterInstance) {
+            throw new Error(
+              'Storage adapter type is "custom" but no customStorageAdapterInstance was provided in CloudTaskMQConfig.',
+            );
+          }
+          adapter = customStorageAdapterInstance;
           break;
         default:
           throw new Error(`Unsupported storage adapter: ${storageAdapter}`);
@@ -48,9 +64,7 @@ export function createStorageAdapterProvider(config: CloudTaskMQConfig): Provide
       // Initialize the adapter
       try {
         await adapter.initialize();
-        console.log(`Successfully initialized ${storageAdapter} adapter`);
       } catch (error) {
-        console.error(`Failed to initialize ${storageAdapter} adapter:`, error);
         throw error;
       }
 
@@ -59,7 +73,6 @@ export function createStorageAdapterProvider(config: CloudTaskMQConfig): Provide
     inject: [
       CLOUD_TASKMQ_CONFIG,
       { token: getConnectionToken(), optional: true },
-      { token: getModelToken('CloudTaskMQTask'), optional: true }
     ],
   };
 }

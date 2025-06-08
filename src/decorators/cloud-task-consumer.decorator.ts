@@ -1,7 +1,11 @@
-import {applyDecorators, Controller, Post, UseGuards, UseInterceptors} from '@nestjs/common';
-import { SetMetadata } from '@nestjs/common';
-import {CloudTaskProcessorInterceptor} from "../interceptors/cloud-task-processor.interceptor";
-import {RateLimiterOptions} from "../interfaces/config.interface";
+import {
+  applyDecorators,
+  Controller,
+  SetMetadata,
+  UseInterceptors,
+} from '@nestjs/common';
+import { CloudTaskProcessorInterceptor } from '../interceptors/cloud-task-processor.interceptor';
+import { RateLimiterOptions } from '../interfaces/config.interface';
 
 /**
  * Metadata key for cloud task consumer controllers
@@ -17,16 +21,16 @@ export interface CloudTaskConsumerOptions {
    * If not specified, the controller will handle all registered queues
    */
   queues?: string[];
-  
+
   /**
    * Path prefix for the controller (defaults to '/cloud-tasks')
    */
   path?: string;
-  
+
   /**
-   * Whether to validate OIDC tokens from Cloud Tasks (recommended for security)
+   * Whether to add OIDC tokens for Cloud Tasks (recommended for security)
    */
-  validateOidcToken?: boolean;
+  includeOidcToken?: boolean;
 
   /**
    * Custom lock duration in milliseconds for tasks processed by this controller
@@ -40,30 +44,29 @@ export interface CloudTaskConsumerOptions {
    */
   autoProcessTasks?: boolean;
 
-    /**
-     * Rate limiter options for controlling task processing throughput
-     * When specified, tasks will be rate-limited according to these settings
-     * This overrides any queue-level rate limiter options
-     */
-    rateLimiterOptions?: RateLimiterOptions[];
-
+  /**
+   * Rate limiter options for controlling task processing throughput
+   * When specified, tasks will be rate-limited according to these settings
+   * This overrides any queue-level rate limiter options
+   */
+  rateLimiterOptions?: RateLimiterOptions[];
 }
 
 /**
  * Marks a controller as a Cloud Task Consumer. This controller will receive
  * HTTP POST requests from Google Cloud Tasks and process them accordingly.
- * 
+ *
  * @param options Configuration options for the consumer
- * 
+ *
  * @example
  * ```typescript
  * @CloudTaskConsumer({
  *   queues: ['email-queue', 'notification-queue'],
- *   validateOidcToken: true
+ *   includeOidcToken: true // Ensures OIDC token is expected/used for tasks handled by this consumer
  * })
- * export class TasksController {
+ * export class MyTaskProcessor {
  *   constructor(private readonly cloudTaskMqService: CloudTaskMQService) {}
- *   
+ *
  *   @Post()
  *   async handleTask(@Body() payload: any, @Req() request: Request) {
  *     // The library will handle most of this for you automatically
@@ -75,14 +78,14 @@ export interface CloudTaskConsumerOptions {
  */
 export function CloudTaskConsumer(options: CloudTaskConsumerOptions = {}) {
   const path = options.path || 'cloud-tasks';
-  
+
   // Combine decorators
   return applyDecorators(
     Controller(path),
     UseInterceptors(CloudTaskProcessorInterceptor),
     SetMetadata(CLOUD_TASK_CONSUMER_KEY, {
       queues: options.queues,
-      validateOidcToken: options.validateOidcToken ?? true,
+      includeOidcToken: options.includeOidcToken ?? true,
       lockDurationMs: options.lockDurationMs,
       autoProcessTasks: options.autoProcessTasks,
       rateLimiterOptions: options.rateLimiterOptions,

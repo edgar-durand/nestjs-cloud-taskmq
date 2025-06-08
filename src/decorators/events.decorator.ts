@@ -10,7 +10,7 @@ export const ON_QUEUE_PROGRESS_KEY = 'cloud_taskmq:on_queue_progress';
 
 /**
  * Marks a method to be called when a task becomes active (starts processing).
- * 
+ *
  * @example
  * ```typescript
  * @Processor('email-queue')
@@ -20,7 +20,7 @@ export const ON_QUEUE_PROGRESS_KEY = 'cloud_taskmq:on_queue_progress';
  *     // Process the email task
  *     return { success: true };
  *   }
- *   
+ *
  *   @OnQueueActive()
  *   onActive(task: CloudTask) {
  *     console.log(`Processing job ${task.id} from ${task.queueName}`);
@@ -39,7 +39,7 @@ export function OnQueueActive() {
 
 /**
  * Marks a method to be called when a task completes successfully.
- * 
+ *
  * @example
  * ```typescript
  * @Processor('email-queue')
@@ -49,7 +49,7 @@ export function OnQueueActive() {
  *     // Process the email task
  *     return { success: true };
  *   }
- *   
+ *
  *   @OnQueueCompleted()
  *   onCompleted(task: CloudTask, result: any) {
  *     console.log(`Job ${task.id} completed with result:`, result);
@@ -68,7 +68,7 @@ export function OnQueueCompleted() {
 
 /**
  * Marks a method to be called when a task fails.
- * 
+ *
  * @example
  * ```typescript
  * @Processor('email-queue')
@@ -78,7 +78,7 @@ export function OnQueueCompleted() {
  *     // Process the email task
  *     throw new Error('Email sending failed');
  *   }
- *   
+ *
  *   @OnQueueFailed()
  *   onFailed(task: CloudTask, error: Error) {
  *     console.error(`Job ${task.id} failed with error:`, error);
@@ -97,7 +97,7 @@ export function OnQueueFailed() {
 
 /**
  * Marks a method to be called when a task reports progress.
- * 
+ *
  * @example
  * ```typescript
  * @Processor('email-queue')
@@ -108,7 +108,7 @@ export function OnQueueFailed() {
  *     // Continue processing...
  *     return { success: true };
  *   }
- *   
+ *
  *   @OnQueueProgress()
  *   onProgress(task: CloudTask, progress: number) {
  *     console.log(`Job ${task.id} is ${progress}% complete`);

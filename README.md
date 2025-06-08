@@ -14,23 +14,11 @@ CloudTaskMQ is a NestJS library that provides a queue system similar to BullMQ b
 - **Easy Job Processing**: Simple API for adding tasks to queues and processing them
 - **Observability**: Track task status and monitor queue health
 - **TypeScript Support**: Built with and for TypeScript with type safety in mind
-
-
-## Installation
-
-```bash
-npm install nestjs-cloud-taskmq
-```
-
-For MongoDB storage adapter (default):
-```bash
-npm install mongoose
-```
-
-For Redis storage adapter (optional):
-```bash
-npm install ioredis
-```
+- **Task Uniqueness (`uniquenessKey`)**: Prevent duplicate task processing. Provide a `uniquenessKey` when adding a task. If a task with the same key is added while the key is "active" in the storage, the new task attempt is dropped.
+    - A key becomes active when a consumer picks up a task with that key and saves it before processing.
+    - The key is stored with a 24-hour Time-To-Live (TTL) as a safeguard (e.g., if a consumer crashes).
+    - If the task completes and `removeOnComplete` is `true` (or `removeOnFail` is `true` for failed tasks), the `uniquenessKey` is removed from storage along with the task record, allowing a new task with the same key to be processed sooner than the full TTL.
+    - If `removeOnComplete` is `false`, the `uniquenessKey` will persist for its full 24-hour TTL, enforcing uniqueness for that entire period even after task completion.
 
 ## Quick Start
 
@@ -57,7 +45,7 @@ import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
           path: 'projects/my-gcp-project/locations/us-central1/queues/notification-queue',
         }
       ],
-      storageAdapter: 'mongo', // or 'redis'
+      storageAdapter: 'mongo', // 'redis', 'memory', or 'custom'
       storageOptions: {
         mongoUri: 'mongodb://localhost:27017/my-app',
         collectionName: 'cloud_tasks', // optional, defaults to 'cloud_taskmq_tasks'
@@ -139,43 +127,6 @@ import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
 export class AppModule {}
 ```
 
-### 2. Using Environment Configuration (Async)
-
-```typescript
-import { Module } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
-import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
-
-@Module({
-  imports: [
-    ConfigModule.forRoot(),
-    CloudTaskMQModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        projectId: configService.get('GCP_PROJECT_ID'),
-        location: configService.get('GCP_LOCATION'),
-        defaultProcessorUrl: configService.get('PROCESSOR_URL'),
-        storageAdapter: configService.get('STORAGE_ADAPTER', 'mongo'),
-        storageOptions: {
-          mongoUri: configService.get('MONGODB_URI'),
-          collectionName: configService.get('COLLECTION_NAME', 'cloud_taskmq_tasks'),
-        },
-        autoCreateQueues: configService.get('AUTO_CREATE_QUEUES') === 'true',
-        queues: [
-          {
-            name: 'email-queue',
-            path: `projects/${configService.get('GCP_PROJECT_ID')}/locations/${configService.get('GCP_LOCATION')}/queues/email-queue`,
-            serviceAccountEmail: configService.get('SERVICE_ACCOUNT_EMAIL'),
-          },
-        ],
-      }),
-    }),
-  ],
-})
-export class AppModule {}
-```
-
 ## Task Producer: Adding Tasks to Queues
 
 ## Adding Tasks to Queues
@@ -188,7 +139,7 @@ import { ProducerService } from 'nestjs-cloud-taskmq';
 export class EmailService {
   constructor(private readonly producerService: ProducerService) {}
 
-  async sendWelcomeEmail(userId: string, email: string): Promise {
+  async sendWelcomeEmail(userId: string, email: string): Promise<void> {
     // Add a task to the email-queue
     await this.producerService.addTask('email-queue', {
       to: email,
@@ -199,6 +150,7 @@ export class EmailService {
       // Optional parameters
       scheduleTime: new Date(Date.now() + 60000), // Run 1 minute from now
       taskId: `welcome-${userId}`, // Custom task ID (must be unique)
+      uniquenessKey: `welcome-email-${userId}`, // Ensures this task is unique for this userId while key is active
       metadata: { importance: 'high' }, // Custom metadata
       maxRetry: 3, // Maximum number of retry attempts
       rateLimiterKey: 'welcome-emails', // Custom rate limiter key
@@ -208,7 +160,7 @@ export class EmailService {
   }
 
   // Schedule a task with a custom ID that includes timestamp to avoid duplicates when retrying
-  async sendDailyDigest(userId: string, email: string): Promise {
+  async sendDailyDigest(userId: string, email: string): Promise<void> {
     const timestamp = Date.now();
     await this.producerService.addTask('email-queue', {
       to: email,
@@ -218,6 +170,48 @@ export class EmailService {
     }, {
       taskId: `daily-digest-${userId}-${timestamp}`,
     });
+  }
+}
+
+### Using `uniquenessKey` for Idempotent Task Submission
+
+The `uniquenessKey` option allows you to ensure that a task is processed only once, even if it's submitted multiple times with the same key. This is useful for operations that should be idempotent based on certain parameters.
+
+**How it works:**
+- When you provide a `uniquenessKey` (e.g., `order-confirmation-${orderId}`) in the `AddTaskOptions`:
+  1.  The `ProducerService` checks if this key is already active in the storage. If so, the new task submission is dropped.
+  2.  If the key is not active, the task is created, and the `uniquenessKey` is passed in its metadata.
+  3.  When a `ConsumerService` instance picks up the task, it again checks the `uniquenessKey`:
+      - If the key is already active in storage (e.g., another consumer processed it, or it's a retry after the key was saved), the task is skipped.
+      - Otherwise, the consumer saves the `uniquenessKey` to storage *before* processing the task. This key is automatically set with a 24-hour Time-To-Live (TTL) by the storage adapter (Redis, Mongo, Memory) as a safeguard.
+- **Interaction with `removeOnComplete` / `removeOnFail`**:
+  - If `removeOnComplete: true` (default for `addTask` if not specified in options or task configuration) and the task completes successfully, the `uniquenessKey` is removed from storage along with the task record. This means a new task with the same `uniquenessKey` can be processed relatively soon after the first one completes.
+  - If `removeOnComplete: false`, the `uniquenessKey` will remain in storage for its full 24-hour TTL, even after the task finishes. This enforces uniqueness for that key for the entire 24-hour period.
+  - Similar logic applies with `removeOnFail` for failed tasks.
+
+**Example:**
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { ProducerService } from 'nestjs-cloud-taskmq';
+
+@Injectable()
+export class OrderService {
+  constructor(private readonly producerService: ProducerService) {}
+
+  async processOrderPayment(orderId: string, paymentDetails: any): Promise<void> {
+    // This task will only be processed once per orderId while the key is active.
+    // If this method is called multiple times for the same orderId quickly,
+    // subsequent attempts will be dropped.
+    await this.producerService.addTask('payment-processing-queue', 
+      { orderId, ...paymentDetails }, 
+      {
+        uniquenessKey: `payment-${orderId}`,
+        // To ensure uniqueness for the full 24-hour TTL, even if this task completes quickly:
+        // removeOnComplete: false, 
+        // By default (or if removeOnComplete: true), the uniquenessKey is cleared on successful completion.
+      }
+    );
   }
 }
 ```
@@ -301,7 +295,10 @@ import { CloudTaskConsumer } from 'nestjs-cloud-taskmq';
 
 @CloudTaskConsumer({
   queues: ['email-queue', 'notification-queue'],
-  validateOidcToken: true, // Validates OIDC tokens from GCP
+  includeOidcToken: true, // If you are using a different auth mechanism or no auth (e.g., internal network),
+  // you might need to adjust or provide custom guards.
+  // For Cloud Tasks with OIDC:
+  // Controller expects OIDC tokens from GCP for authentication.
 })
 export class TasksController {
   // The CloudTaskMQ library will handle most of the work for you,
@@ -319,7 +316,7 @@ export class TasksController {
 
 ## Storage Adapters
 
-CloudTaskMQ supports different storage adapters for storing task state. By default, it includes adapters for MongoDB and Redis.
+CloudTaskMQ supports different storage adapters for storing task state. By default, it includes adapters for MongoDB, Redis, and InMemory.
 
 ### MongoDB Adapter
 
@@ -361,61 +358,213 @@ import { IStateStorageAdapter, TaskQueryOptions, ITask, TaskStatus, IRateLimiter
 
 @Injectable()
 export class CustomStorageAdapter implements IStateStorageAdapter {
-  // Implement all required methods
-  async initialize(): Promise {
-    // Initialize connection to your storage
+  async initialize(): Promise<void> {
+    // Initialize connection to your storage, e.g., DB connection, create tables/collections if not exist
+    console.log('CustomStorageAdapter initialized');
   }
 
-  async createTask(task: Omit): Promise {
-    // Create task in your storage
+  async createTask(task: Omit<ITask, 'createdAt' | 'updatedAt'>): Promise<ITask> {
+    // Logic to save the task to your custom storage
+    // Ensure to return the full task object including generated createdAt and updatedAt
+    const newTask = { ...task, createdAt: new Date(), updatedAt: new Date(), id: 'custom-id' } as ITask; // Example
+    console.log('Task created:', newTask.taskId);
+    return newTask;
   }
 
-  async getTaskById(taskId: string): Promise {
-    // Retrieve task from your storage
+  async getTaskById(taskId: string): Promise<ITask | null> {
+    // Logic to retrieve a task by its ID from your storage
+    console.log('Getting task by ID:', taskId);
+    return null; // Replace with actual implementation
   }
 
-  // ... other methods from the interface
-
-  // Rate limiter bucket methods
-  async getRateLimiterBucket(key: string): Promise {
-    // Get rate limiter bucket from your storage
+  async updateTaskStatus(taskId: string, status: TaskStatus, additionalData?: Partial<ITask>): Promise<ITask | null> {
+    // Logic to update the status and other data of a task
+    console.log('Updating task status:', taskId, status);
+    return null; // Replace with actual implementation
   }
 
-  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise {
-    // Save rate limiter bucket to your storage
+  async acquireTaskLock(taskId: string, workerId: string, lockDurationMs: number): Promise<boolean> {
+    // Logic to attempt to lock a task for processing
+    // Return true if lock acquired, false otherwise
+    console.log('Acquiring task lock:', taskId, workerId, lockDurationMs);
+    return true; // Replace with actual implementation
   }
 
-  async deleteRateLimiterBucket(key: string): Promise {
-    // Delete rate limiter bucket from your storage
+  async releaseTaskLock(taskId: string, workerId: string): Promise<boolean> {
+    // Logic to release a lock on a task
+    // Return true if lock released, false otherwise (e.g., if not locked by this worker)
+    console.log('Releasing task lock:', taskId, workerId);
+    return true; // Replace with actual implementation
+  }
+
+  async findTasks(options: TaskQueryOptions): Promise<ITask[]> {
+    // Logic to find tasks based on query options (status, queueName, pagination, sorting)
+    console.log('Finding tasks with options:', options);
+    return []; // Replace with actual implementation
+  }
+
+  async countTasks(options: TaskQueryOptions): Promise<number> {
+    // Logic to count tasks based on query options
+    console.log('Counting tasks with options:', options);
+    return 0; // Replace with actual implementation
+  }
+
+  async deleteTask(taskId: string): Promise<boolean> {
+    // Logic to delete a task by its ID
+    // Return true if deleted, false otherwise
+    console.log('Deleting task:', taskId);
+    return true; // Replace with actual implementation
+  }
+
+  async completeTask(taskId: string, result?: any): Promise<ITask> {
+    // Logic to mark a task as completed, store result, and update status
+    console.log('Completing task:', taskId, result);
+    // Should typically call updateTaskStatus internally or similar logic
+    return null; // Replace with actual implementation that returns the updated task
+  }
+
+  async failTask(taskId: string, error?: any): Promise<ITask> {
+    // Logic to mark a task as failed, store error, and update status
+    console.log('Failing task:', taskId, error);
+    // Should typically call updateTaskStatus internally or similar logic
+    return null; // Replace with actual implementation that returns the updated task
+  }
+
+  // Rate limiter methods
+  async getRateLimiterBucket(key: string): Promise<IRateLimiterBucket | null> {
+    // Logic to retrieve a rate limiter bucket by its key
+    console.log('Getting rate limiter bucket:', key);
+    return null; // Replace with actual implementation
+  }
+
+  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise<IRateLimiterBucket> {
+    // Logic to save a rate limiter bucket
+    console.log('Saving rate limiter bucket:', bucket.key);
+    return bucket; // Replace with actual implementation that returns the saved/updated bucket
+  }
+
+  async deleteRateLimiterBucket(key: string): Promise<boolean> {
+    // Logic to delete a rate limiter bucket by its key
+    // Return true if deleted, false otherwise
+    console.log('Deleting rate limiter bucket:', key);
+    return true; // Replace with actual implementation
+  }
+
+  // Uniqueness key methods
+  async getUniquenessValue(key: string): Promise<boolean> {
+    // Logic to check if a uniqueness key exists (and is active)
+    // Return true if key exists, false otherwise
+    console.log('Getting uniqueness value for key:', key);
+    return false; // Replace with actual implementation
+  }
+
+  async saveUniquenessKey(key: string): Promise<void> {
+    // Logic to save a uniqueness key (typically with a TTL, e.g., 24 hours)
+    console.log('Saving uniqueness key:', key);
+  }
+
+  async removeUniquenessKey(key: string): Promise<void> {
+    // Logic to remove a uniqueness key
+    console.log('Removing uniqueness key:', key);
   }
 }
 ```
 
-Then register your custom adapter:
+### Integrating Your Custom Storage Adapter
+
+Once you have defined your `CustomStorageAdapter` class (as shown above), you need to register an instance of it with the `CloudTaskMQModule`. This is done by setting the `storageAdapter` option to `'custom'` and providing your adapter instance to the `customStorageAdapterInstance` property in the module configuration.
+
+The `CloudTaskMQModule` will automatically call the `initialize()` method on your provided `customStorageAdapterInstance` during its bootstrap process.
+
+**1. Basic Integration (Simple Instantiation)**
+
+If your `CustomStorageAdapter` does not have complex dependencies and can be instantiated directly:
 
 ```typescript
+// src/app.module.ts (or your main application module)
+
 import { Module } from '@nestjs/common';
-import { CloudTaskMQModule, CLOUD_TASKMQ_STORAGE_ADAPTER } from 'nestjs-cloud-taskmq';
-import { CustomStorageAdapter } from './custom-storage.adapter';
+import { CloudTaskMQModule } from 'nestjs-cloud-taskmq'; // Adjust path as needed
+import { CustomStorageAdapter } from './your-path-to-adapter/custom-storage.adapter'; // Adjust path
 
 @Module({
   imports: [
-    CloudTaskMQModule.forRootAsync({
-      useFactory: () => ({
-        // ... your config
-        storageAdapter: 'custom', // This can be any string
-      }),
-      providers: [
+    // ... other NestJS modules (e.g., ConfigModule)
+    CloudTaskMQModule.forRoot({
+      // --- Essential Cloud Task MQ Configuration ---
+      projectId: 'your-gcp-project-id', // Replace with your GCP Project ID
+      location: 'your-gcp-location',   // Replace with your GCP Location (e.g., 'us-central1')
+      defaultProcessorUrl: 'https://your-app-url.com/tasks/process', // Optional: Default base URL for task handlers
+
+      queues: [
         {
-          provide: CLOUD_TASKMQ_STORAGE_ADAPTER,
-          useClass: CustomStorageAdapter,
+          name: 'email-queue',
+          path: 'projects/your-gcp-project-id/locations/your-gcp-location/queues/email-queue',
+          // processorUrl: 'https://your-app-url.com/tasks/email', // Optional: Specific URL for this queue
         },
+        // ... add more queue configurations
       ],
+
+      // --- Custom Storage Adapter Configuration ---
+      storageAdapter: 'custom',
+      customStorageAdapterInstance: new CustomStorageAdapter(/* Pass constructor arguments if any */),
+
+      // --- Optional Global Settings ---
+      // lockDurationMs: 300000, // Optional: Default 5 minutes
+      // autoCreateQueues: false, // Optional: Default false
     }),
   ],
+  // ... controllers, providers for your application
 })
 export class AppModule {}
 ```
+
+**2. Advanced Integration (Using NestJS DI for Custom Adapter)**
+
+If your `CustomStorageAdapter` has its own dependencies that need to be injected by NestJS (e.g., a database connection service), you should make your `CustomStorageAdapter` a NestJS provider. Then, use `CloudTaskMQModule.forRootAsync` to retrieve the adapter instance from the DI container.
+
+First, ensure your `CustomStorageAdapter` is an injectable provider, possibly within its own module:
+
+Then, integrate it using `CloudTaskMQModule.forRootAsync`:
+
+```typescript
+// src/app.module.ts (or your main application module)
+
+import { Module } from '@nestjs/common';
+import { CloudTaskMQModule } from 'nestjs-cloud-taskmq';
+import { CustomStorageAdapter } from './custom-storage/custom-storage.adapter';
+// import { ConfigModule, ConfigService } from '@nestjs/config'; // Example for config-based setup
+
+@Module({
+  imports: [
+    // ConfigModule.forRoot({ isGlobal: true }), // Example
+    CloudTaskMQModule.forRootAsync({
+      imports: [CustomStorageModule /*, ConfigModule */], // Make CustomStorageAdapter and other services like ConfigService available
+      useFactory: async (customAdapter: CustomStorageAdapter /*, configService: ConfigService */) => {
+        // The customAdapter instance is managed by NestJS DI.
+        // Its initialize() method will be called by CloudTaskMQModule.
+        return {
+          // projectId: configService.get('GCP_PROJECT_ID'), // Example: from ConfigService
+          // location: configService.get('GCP_LOCATION'),     // Example: from ConfigService
+          projectId: 'your-gcp-project-id',
+          location: 'your-gcp-location',
+          queues: [ /* ... your queue configurations ... */ ],
+
+          storageAdapter: 'custom',
+          customStorageAdapterInstance: customAdapter,
+
+          // ... other global configurations
+        };
+      },
+      inject: [CustomStorageAdapter /*, ConfigService */], // Inject your custom adapter and other dependencies for the factory
+    }),
+  ],
+  providers: [CustomStorageAdapter /*, ConfigService */], // Make CustomStorageAdapter and other services like ConfigService available
+})
+export class AppModule {}
+```
+
+Remember to replace placeholder values like `'your-gcp-project-id'`, paths, and service names with your actual configuration.
 
 ## Rate Limiting
 

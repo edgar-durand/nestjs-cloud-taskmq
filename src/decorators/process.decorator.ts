@@ -13,7 +13,7 @@ export interface ProcessOptions {
    * Custom name for the processor (if different than the method name)
    */
   name?: string;
-  
+
   /**
    * Concurrency limit for this specific handler
    */
@@ -24,9 +24,9 @@ export interface ProcessOptions {
  * Marks a method as a task handler within a processor class.
  * Methods decorated with @Process() will be invoked when a task from the
  * queue registered by the class-level @Processor() decorator is received.
- * 
+ *
  * @param options Additional process handler options
- * 
+ *
  * @example
  * ```typescript
  * @Processor('email-queue')

@@ -1,14 +1,14 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { DiscoveryService, MetadataScanner, ModuleRef } from '@nestjs/core';
 import { InstanceWrapper } from '@nestjs/core/injector/instance-wrapper';
-import { 
-  PROCESSOR_QUEUE_KEY, 
-  PROCESSOR_METADATA_KEY, 
-  ProcessorOptions 
+import {
+  PROCESSOR_METADATA_KEY,
+  PROCESSOR_QUEUE_KEY,
+  ProcessorOptions,
 } from '../decorators/processor.decorator';
-import { 
-  PROCESS_METHOD_KEY, 
-  ProcessOptions 
+import {
+  PROCESS_METHOD_KEY,
+  ProcessOptions,
 } from '../decorators/process.decorator';
 import {
   ON_QUEUE_ACTIVE_KEY,
@@ -17,12 +17,19 @@ import {
   ON_QUEUE_PROGRESS_KEY,
 } from '../decorators/events.decorator';
 import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
-import { ITask, TaskStatus } from '../interfaces/task.interface';
+import { AddTaskOptions, TaskStatus } from '../interfaces/task.interface';
 import { CloudTask } from '../models/cloud-task.model';
-import {CloudTaskMQConfig, RateLimiterOptions} from '../interfaces/config.interface';
-import {CLOUD_TASK_CONSUMER_KEY, CloudTaskConsumerOptions} from "../decorators/cloud-task-consumer.decorator";
-import {RateLimiterService} from "./rate-limiter.service";
-import {ProducerService} from "./producer.service";
+import {
+  CloudTaskMQConfig,
+  RateLimiterOptions,
+} from '../interfaces/config.interface';
+import {
+  CLOUD_TASK_CONSUMER_KEY,
+  CloudTaskConsumerOptions,
+} from '../decorators/cloud-task-consumer.decorator';
+import { RateLimiterService } from './rate-limiter.service';
+import { ProducerService } from './producer.service';
+import * as crypto from 'node:crypto';
 
 /**
  * Structure to hold discovered task processors
@@ -30,22 +37,22 @@ import {ProducerService} from "./producer.service";
 interface TaskProcessorMetadata {
   // The instance of the processor class
   instance: any;
-  
+
   // Queue name the processor handles
   queueName: string;
-  
+
   // Method that processes tasks
   processMethod: string;
-  
+
   // Process method options
   processOptions: ProcessOptions;
-  
+
   // Event handler methods
   onActive?: string;
   onCompleted?: string;
   onFailed?: string;
   onProgress?: string;
-  
+
   // Processor options
   options: ProcessorOptions;
 }
@@ -68,7 +75,7 @@ export class ConsumerService implements OnModuleInit {
     private readonly producerService: ProducerService,
   ) {
     // Generate a unique worker ID for this instance
-    this.workerId = `worker-${Math.random().toString(36).substring(2, 15)}`;
+    this.workerId = `worker-${crypto.randomUUID()}`;
     this.lockDurationMs = config.lockDurationMs || 60000; // 60 seconds default
   }
 
@@ -77,12 +84,17 @@ export class ConsumerService implements OnModuleInit {
    */
   async onModuleInit() {
     await this.discoverProcessors();
-    this.logger.log(`Initialized ConsumerService with workerId ${this.workerId}`);
+    await this.discoverControllers();
+    this.logger.log(
+      `Initialized ConsumerService with workerId ${this.workerId}`,
+    );
     this.logger.log(`Discovered ${this.processors.size} task processors`);
-    
+
     // Log discovered processors
     for (const [queueName, metadata] of this.processors.entries()) {
-      this.logger.log(`Processor for queue '${queueName}': ${metadata.instance.constructor.name}.${metadata.processMethod}`);
+      this.logger.log(
+        `Processor for queue '${queueName}': ${metadata.instance.constructor.name}.${metadata.processMethod}`,
+      );
     }
   }
 
@@ -90,51 +102,35 @@ export class ConsumerService implements OnModuleInit {
    * Discover all processor classes in the application
    */
   private async discoverProcessors() {
-    // Discover all providers and controllers in the application
+    // Discover all providers in the application
     const providers = this.discoveryService.getProviders();
-    const controllers = this.discoveryService.getControllers();
 
-    // Discover controllers with CloudTaskConsumer decorator
-    for (const wrapper of controllers) {
-      if (wrapper.instance) {
-        const metadata = Reflect.getMetadata(CLOUD_TASK_CONSUMER_KEY, wrapper.instance.constructor);
-
-        if (metadata) {
-          // Store metadata by queue name for quick lookup during task processing
-          if (metadata.queues && Array.isArray(metadata.queues)) {
-            for (const queue of metadata.queues) {
-              this.controllerMetadata.set(queue, metadata);
-              this.logger.debug(`Found controller for queue '${queue}' with metadata: ${JSON.stringify(metadata)}`);
-            }
-          } else {
-            // If no specific queues, this controller handles all queues
-            this.controllerMetadata.set('*', metadata);
-            this.logger.debug(`Found controller for all queues with metadata: ${JSON.stringify(metadata)}`);
-          }
-        }
-      }
-    }
-    
     // Filter providers that have the @Processor decorator
-    const processorProviders = providers.filter(wrapper => this.isProcessor(wrapper));
-    
+    const processorProviders = providers.filter((wrapper) =>
+      this.isProcessor(wrapper),
+    );
+
     // Process each processor provider
     for (const wrapper of processorProviders) {
       const instance = wrapper.instance;
       const prototype = Object.getPrototypeOf(instance);
-      
+
       if (!instance || !prototype) {
         continue;
       }
-      
+
       // Get queue name and processor options from metadata
-      const queueName = Reflect.getMetadata(PROCESSOR_QUEUE_KEY, instance.constructor);
-      const processorOptions = Reflect.getMetadata(PROCESSOR_METADATA_KEY, instance.constructor) || {};
-      
+      const queueName = Reflect.getMetadata(
+        PROCESSOR_QUEUE_KEY,
+        instance.constructor,
+      );
+      const processorOptions =
+        Reflect.getMetadata(PROCESSOR_METADATA_KEY, instance.constructor) || {};
+
       if (!queueName) {
         continue;
       }
-      
+
       // Scan methods of the processor class for handlers
       const methodNames = this.metadataScanner.getAllMethodNames(prototype);
       let processMethod: string = null;
@@ -143,18 +139,21 @@ export class ConsumerService implements OnModuleInit {
       let onCompleted: string = null;
       let onFailed: string = null;
       let onProgress: string = null;
-      
+
       // Find process method and event handlers
       for (const methodName of methodNames) {
         const handler = instance[methodName];
-        
+
         // Check if method is a process handler
-        const processMetadata = Reflect.getMetadata(PROCESS_METHOD_KEY, handler);
+        const processMetadata = Reflect.getMetadata(
+          PROCESS_METHOD_KEY,
+          handler,
+        );
         if (processMetadata) {
           processMethod = methodName;
           processOptions = processMetadata;
         }
-        
+
         // Check if method is an event handler
         if (Reflect.getMetadata(ON_QUEUE_ACTIVE_KEY, handler)) {
           onActive = methodName;
@@ -169,7 +168,7 @@ export class ConsumerService implements OnModuleInit {
           onProgress = methodName;
         }
       }
-      
+
       // Register the processor if it has a process method
       if (processMethod) {
         this.processors.set(queueName, {
@@ -184,7 +183,47 @@ export class ConsumerService implements OnModuleInit {
           options: processorOptions,
         });
       } else {
-        this.logger.warn(`Processor for queue '${queueName}' has no @Process method`);
+        this.logger.warn(
+          `Processor for queue '${queueName}' has no @Process method`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Discover all controllers classes in the application
+   */
+  private async discoverControllers() {
+    const controllers = this.discoveryService.getControllers();
+    // Discover controllers with CloudTaskConsumer decorator
+    for (const wrapper of controllers) {
+      if (wrapper.instance) {
+        const metadata = Reflect.getMetadata(
+          CLOUD_TASK_CONSUMER_KEY,
+          wrapper.instance.constructor,
+        );
+
+        if (metadata) {
+          // Store metadata by queue name for quick lookup during task processing
+          if (metadata.queues && Array.isArray(metadata.queues)) {
+            for (const queue of metadata.queues) {
+              this.controllerMetadata.set(queue, metadata);
+              this.logger.debug(
+                `Found controller for queue '${queue}' with metadata: ${JSON.stringify(
+                  metadata,
+                )}`,
+              );
+            }
+          } else {
+            // If no specific queues, this controller handles all queues
+            this.controllerMetadata.set('*', metadata);
+            this.logger.debug(
+              `Found controller for all queues with metadata: ${JSON.stringify(
+                metadata,
+              )}`,
+            );
+          }
+        }
       }
     }
   }
@@ -197,7 +236,7 @@ export class ConsumerService implements OnModuleInit {
     if (!instance) {
       return false;
     }
-    
+
     return !!Reflect.getMetadata(PROCESSOR_QUEUE_KEY, instance.constructor);
   }
 
@@ -211,41 +250,43 @@ export class ConsumerService implements OnModuleInit {
    * @returns Matching rate limiter options or null
    */
   private getRateLimiterOptions(
-      queueName: string,
-      rateLimiterKey?: string
+    queueName: string,
+    rateLimiterKey?: string,
   ): RateLimiterOptions | string | null {
     if (!rateLimiterKey) {
       return null; // No rate limiting if key not provided
     }
 
     // First check controller-level rate limiters (highest priority)
-    const queueMetadata = this.controllerMetadata?.get(queueName) || this.controllerMetadata?.get('*');
+    const queueMetadata =
+      this.controllerMetadata?.get(queueName) ||
+      this.controllerMetadata?.get('*');
     if (queueMetadata?.rateLimiterOptions) {
       // Find a matching limiter by key
       if (Array.isArray(queueMetadata.rateLimiterOptions)) {
         const matchingLimiter = queueMetadata.rateLimiterOptions.find(
-            limiter => limiter.limiterKey === rateLimiterKey
+          (limiter) => limiter.limiterKey === rateLimiterKey,
         );
 
         if (matchingLimiter) {
-          this.logger.debug(`Using controller-specific rate limiter for key ${rateLimiterKey}`);
           return matchingLimiter;
         }
-      } else if ((queueMetadata.rateLimiterOptions as RateLimiterOptions).limiterKey === rateLimiterKey) {
-        this.logger.debug(`Using controller-specific rate limiter for key ${rateLimiterKey}`);
+      } else if (
+        (queueMetadata.rateLimiterOptions as RateLimiterOptions).limiterKey ===
+        rateLimiterKey
+      ) {
         return queueMetadata.rateLimiterOptions as RateLimiterOptions;
       }
     }
 
     // Then check queue-specific rate limiters
-    const queueConfig = this.config.queues.find(q => q.name === queueName);
+    const queueConfig = this.config.queues.find((q) => q.name === queueName);
     if (queueConfig?.rateLimiterOptions) {
       const matchingLimiter = queueConfig.rateLimiterOptions.find(
-          limiter => limiter.limiterKey === rateLimiterKey
+        (limiter) => limiter.limiterKey === rateLimiterKey,
       );
 
       if (matchingLimiter) {
-        this.logger.debug(`Using queue-specific rate limiter for key ${rateLimiterKey}`);
         return matchingLimiter;
       }
     }
@@ -255,15 +296,10 @@ export class ConsumerService implements OnModuleInit {
     if (rateLimiterKey && rateLimiterKey.includes(':')) {
       // Only mark it as a dynamic limiter if we have a RateLimiterService available
       if (this.rateLimiterService) {
-        this.logger.debug(`Using dynamic rate limiter with key ${rateLimiterKey}`);
         return rateLimiterKey;
-      } else {
-        this.logger.warn(`Cannot use dynamic rate limiter with key ${rateLimiterKey} - RateLimiterService not available`);
       }
     }
 
-    // No matching rate limiter found
-    this.logger.debug(`No rate limiter found for key ${rateLimiterKey}`);
     return null;
   }
 
@@ -272,127 +308,126 @@ export class ConsumerService implements OnModuleInit {
    * This uses the Cloud Tasks native scheduling feature to retry the task later
    */
   private async reEnqueueTaskWithDelay(
-      taskId: string,
-      queueName: string,
-      payload: any,
-      metadata: any,
-      waitTimeMs: number
-  ): Promise<void> {
+    taskId: string,
+    queueName: string,
+    payload: any,
+    metadata: any,
+    waitTimeMs: number,
+  ) {
     try {
       // First, get the original task to check if it's a retry
       const originalTask = await this.storageAdapter.getTaskById(taskId);
 
       // Release the current lock
       await this.storageAdapter.releaseTaskLock(taskId, this.workerId);
+      if (
+        typeof originalTask?.metadata.uniquenessKey === 'string' &&
+        originalTask?.metadata.uniquenessKey !== 'undefined'
+      ) {
+        await this.storageAdapter.removeUniquenessKey(
+          originalTask?.metadata?.uniquenessKey,
+        );
+      }
 
-      // Extract the original task ID (before any retries)
-      let baseTaskId = taskId;
       let retryCount = 0;
 
       // Check if this task already has retry information
       if (originalTask?.metadata?.retryHistory) {
-        baseTaskId = originalTask.metadata.originalTaskId || taskId;
         retryCount = originalTask.metadata.retryCount || 0;
-      } else if (taskId.includes('-retry-')) {
-        // Parse retry count from the task ID as a fallback
-        const parts = taskId.split('-retry-');
-        baseTaskId = parts[0];
-        retryCount = parts.length - 1;
       }
 
       // Increment retry count
       retryCount++;
 
-      // Get rate limiter options for this task to check max retries
-      const rateLimiterKey = metadata?.rateLimiterKey;
-      const rateLimiterOptions = this.getRateLimiterOptions(queueName, rateLimiterKey);
-
       // Determine max retries (default to 5 if not specified)
       // Check for maxRetry in the task's metadata
-      const maxRetry = metadata?.maxRetry ?? originalTask?.metadata?.maxRetry ?? 5;
+      const maxRetry =
+        metadata?.maxRetry ?? originalTask?.metadata?.maxRetry ?? 5;
 
       // Check if we've exceeded max retries
       if (retryCount > maxRetry) {
-        this.logger.warn(`Task ${baseTaskId} has exceeded maximum retries (${maxRetry}). Marking as failed.`);
-
-        // Update the task status to failed
-        await this.storageAdapter.updateTaskStatus(
-            taskId,
-            TaskStatus.FAILED,
-            {
-              metadata: {
-                ...metadata,
-                originalTaskId: baseTaskId,
-                retryCount: retryCount - 1, // Don't count this attempt since we're not retrying
-                retryHistory: [
-                  ...(originalTask?.metadata?.retryHistory || []),
-                  {
-                    timestamp: new Date(),
-                    waitTimeMs: 0,
-                    reason: 'max-retries-exceeded'
-                  }
-                ]
-              },
-              failureReason: `Rate limit exceeded after ${retryCount - 1} retries (maximum: ${maxRetry})`
-            }
+        this.logger.warn(
+          `Task ${taskId} has exceeded maximum retries (${maxRetry}). Marking as failed.`,
         );
 
-        this.logger.log(`Rate-limited task ${baseTaskId} failed after reaching maximum retries (${maxRetry})`);
+        // Update the task status to failed
+        await this.storageAdapter.updateTaskStatus(taskId, TaskStatus.FAILED, {
+          metadata: {
+            ...originalTask?.metadata,
+            ...metadata,
+            originalTaskId: taskId,
+            retryCount: retryCount - 1, // Don't count this attempt since we're not retrying
+            retryHistory: [
+              ...(originalTask?.metadata?.retryHistory || []),
+              {
+                timestamp: new Date(),
+                waitTimeMs: 0,
+                reason: 'max-retries-exceeded',
+              },
+            ],
+          },
+          failureReason: `Rate limit exceeded after ${
+            retryCount - 1
+          } retries (maximum: ${maxRetry})`,
+        });
         return;
       }
 
       // Calculate new schedule time
-      const scheduleTime = new Date(Date.now() + waitTimeMs);
+      const scheduleTime = new Date(Date.now() + (waitTimeMs ?? 0));
+
+      // Get or create retry history
+      const retryHistory = metadata?.retryHistory || [];
+      retryHistory.push({
+        timestamp: new Date(),
+        waitTimeMs,
+        reason: 'rate-limited',
+      });
 
       // Prepare retry metadata
       const updatedMetadata = {
+        removeOnComplete: 60 * 60 * 24 * 30,
+        removeOnFail: 60 * 60 * 24 * 30,
+        ...originalTask?.metadata,
         ...metadata,
-        originalTaskId: baseTaskId,
-        retryCount: retryCount,
+        originalTaskId: taskId,
+        retryCount,
         maxRetry,
-        retryHistory: [
-          ...(originalTask?.metadata?.retryHistory || []),
-          {
-            timestamp: new Date(),
-            waitTimeMs,
-            reason: 'rate-limited'
-          }
-        ]
+        retryHistory,
+        scheduleTime,
       };
 
-      // Use a clean task ID that doesn't grow with each retry
-      const timestamp = Date.now();
-      const newTaskId = `${baseTaskId}-retry-${retryCount}-${timestamp}`;
+      const additionalData: AddTaskOptions = {
+        ...updatedMetadata,
+        taskId,
+        maxRetry,
+      };
 
       // Update the task status to reflect that it's been rescheduled
-      if (originalTask) {
-        await this.storageAdapter.updateTaskStatus(
-            taskId,
-            TaskStatus.IDLE,
-            {
-              metadata: updatedMetadata,
-              taskId: newTaskId // Update the task ID in the document
-            }
-        );
-      }
+      await this.storageAdapter.updateTaskStatus(
+        taskId,
+        TaskStatus.IDLE,
+        additionalData,
+      );
 
       // Create a new delayed task in Cloud Tasks (the original document is reused)
-      await this.producerService.addTask(queueName, payload, {
-        scheduleTime,
-        metadata: updatedMetadata,
-        taskId: newTaskId,
-        maxRetry // Pass the maxRetry value to the new task
-      });
+      const task = await this.producerService.addTask(
+        queueName,
+        payload,
+        additionalData,
+      );
 
-      this.logger.log(`Re-enqueued rate-limited task ${taskId} for queue ${queueName} with ${waitTimeMs}ms delay`);
+      return task;
     } catch (error) {
-      this.logger.error(`Failed to re-enqueue rate-limited task: ${error.message}`, error.stack);
+      this.logger.error(error, {
+        message: `Failed to re-enqueue rate-limited task: ${error.message}`,
+      });
     }
   }
 
   /**
    * Process a task received from Cloud Tasks
-   * 
+   *
    * @param taskId ID of the task
    * @param queueName Name of the queue
    * @param payload Task payload
@@ -406,45 +441,119 @@ export class ConsumerService implements OnModuleInit {
     metadata?: Record<string, any>,
   ): Promise<any> {
     // Extract rate limiter key from metadata
-    const rateLimiterKey = metadata?.rateLimiterKey;
+    const taskMetadata: Partial<AddTaskOptions> = metadata;
+    const rateLimiterKey = taskMetadata?.rateLimiterKey;
+    const uniquenessKey = taskMetadata?.uniquenessKey;
+    const shouldHandleUniqueness =
+      !!uniquenessKey &&
+      typeof uniquenessKey === 'string' &&
+      uniquenessKey !== 'undefined';
 
-    // Get rate limiter options based on the key
-    const rateLimiterOptions = this.getRateLimiterOptions(queueName, rateLimiterKey);
+    // Update task status to ACTIVE
+    let taskRecord = await this.storageAdapter.getTaskById(taskId);
+    // Find or create the task record
+    if (!taskRecord) {
+      // If task doesn't exist in storage, ignore
+      this.logger.error(new Error(`Task not found in storage: ${taskId}`));
+      return;
+    }
 
-    // Check rate limiter if configured and we have a matching key
-    if (rateLimiterOptions && rateLimiterKey) {
-      const canProcess = await this.rateLimiterService.tryConsume(rateLimiterOptions);
+    taskRecord = await this.storageAdapter.updateTaskStatus(
+      taskId,
+      TaskStatus.ACTIVE,
+      { startedAt: new Date() },
+    );
 
-      if (!canProcess) {
-        // Calculate wait time
-        const waitTimeMs = await this.rateLimiterService.getWaitTimeMs(rateLimiterOptions);
-
-        // Re-enqueue task with delay
-        await this.reEnqueueTaskWithDelay(taskId, queueName, payload, metadata, waitTimeMs);
-        this.logger.warn(`Rate limited task ${taskId} for queue ${queueName} with key "${rateLimiterKey}", will retry in ${waitTimeMs}ms`);
+    if (shouldHandleUniqueness) {
+      const existingUniqueness = await this.storageAdapter.getUniquenessValue(
+        uniquenessKey,
+      );
+      if (existingUniqueness === true) {
+        this.logger.warn({
+          message: `Uniqueness key ${uniquenessKey} exists. Skipping task.`,
+        });
+        try {
+          await this.storageAdapter.failTask(
+            taskId,
+            `Uniqueness key ${uniquenessKey} already exists`,
+          );
+        } catch {}
         return;
+      } else {
+        try {
+          await this.storageAdapter.saveUniquenessKey(uniquenessKey);
+        } catch {
+          try {
+            await this.storageAdapter.failTask(
+              taskId,
+              `Uniqueness key ${uniquenessKey} already exists`,
+            );
+          } catch {}
+          return;
+        }
       }
     }
 
+    // Get rate limiter options based on the key
+    const rateLimiterOptions = this.getRateLimiterOptions(
+      queueName,
+      rateLimiterKey,
+    );
+
+    // Check rate limiter if configured and we have a matching key
+    if (rateLimiterOptions && rateLimiterKey) {
+      const canProcess = await this.rateLimiterService.tryConsume(
+        rateLimiterOptions,
+      );
+
+      if (!canProcess) {
+        // Calculate wait time
+        const waitTimeMs = await this.rateLimiterService.getWaitTimeMs(
+          rateLimiterOptions,
+        );
+
+        // Implement progressive backoff for repeat rate limiting
+        let adjustedWaitTimeMs = waitTimeMs;
+        const retryCount = metadata?.retryCount || 0;
+        if (retryCount > 0) {
+          // Exponential backoff with a maximum delay cap
+          const backoffFactor = Math.min(Math.pow(2, retryCount - 1), 10);
+          adjustedWaitTimeMs = Math.min(waitTimeMs * backoffFactor, 900_000); // Cap at 15 mins
+        }
+        let reEnqueuedSuccessfully = false;
+        try {
+          if (shouldHandleUniqueness) {
+            await this.storageAdapter.removeUniquenessKey(uniquenessKey);
+          }
+
+          // Re-enqueue task with delay
+          const createdTask = await this.reEnqueueTaskWithDelay(
+            taskId,
+            queueName,
+            payload,
+            metadata,
+            adjustedWaitTimeMs,
+          );
+          reEnqueuedSuccessfully = !!createdTask?.taskId;
+        } catch (error) {
+          this.logger.error(error, {
+            message: `Error during re-enqueue for rate-limited task ${taskId}: ${error.message}.`,
+          });
+          reEnqueuedSuccessfully = false;
+        }
+        if (!reEnqueuedSuccessfully) {
+          const errorMessage = `Failed to re-enqueue rate-limited task ${taskId} for queue ${queueName}. Original task should be NACKed or will time out and be redelivered.`;
+          // Throw an error to ensure the original message is NACKed and redelivered by Cloud Tasks
+          throw new Error(errorMessage);
+        }
+        return;
+      }
+    }
 
     // Find the appropriate processor for this queue
     const processor = this.processors.get(queueName);
     if (!processor) {
       throw new Error(`No processor found for queue '${queueName}'`);
-    }
-    
-    // Find or create the task record
-    let taskRecord = await this.storageAdapter.getTaskById(taskId);
-    if (!taskRecord) {
-      // If task doesn't exist in storage, create it
-      const newTask: Omit<ITask, 'createdAt' | 'updatedAt'> = {
-        taskId,
-        queueName,
-        status: TaskStatus.IDLE,
-        payload,
-        metadata,
-      };
-      taskRecord = await this.storageAdapter.createTask(newTask);
     }
 
     // Determine the lock duration to use with priority:
@@ -454,44 +563,53 @@ export class ConsumerService implements OnModuleInit {
     let lockDurationMs = this.lockDurationMs; // Start with global default
 
     // Check for queue-specific lock duration
-    const queueConfig = this.config.queues.find(q => q.name === queueName);
+    const queueConfig = this.config.queues.find((q) => q.name === queueName);
     if (queueConfig && typeof queueConfig.lockDurationMs === 'number') {
       lockDurationMs = queueConfig.lockDurationMs;
-      this.logger.debug(`Using queue-specific lock duration for ${queueName}: ${lockDurationMs}ms`);
     }
 
     // Look up controller metadata for this queue
-    const queueMetadata = this.controllerMetadata?.get(queueName) || this.controllerMetadata?.get('*');
+    const queueMetadata =
+      this.controllerMetadata?.get(queueName) ||
+      this.controllerMetadata?.get('*');
 
-    // Controller-level setting takes highest priority
+    // Controller-level setting takes the highest priority
     if (queueMetadata && typeof queueMetadata.lockDurationMs === 'number') {
       lockDurationMs = queueMetadata.lockDurationMs;
-      this.logger.debug(`Using controller-specific lock duration for ${queueName}: ${lockDurationMs}ms`);
     }
 
+    // Attempt to acquire a lock on the task with retries
+    let lockAcquired = false;
+    let retryCount = 0;
+    const maxLockRetries = 3;
+    const lockRetryDelayMs = 500;
 
-    // Attempt to acquire a lock on the task
-    const lockAcquired = await this.storageAdapter.acquireTaskLock(
-      taskId,
-      this.workerId,
-      lockDurationMs,
-    );
-    
+    while (!lockAcquired && retryCount < maxLockRetries) {
+      lockAcquired = await this.storageAdapter.acquireTaskLock(
+        taskId,
+        this.workerId,
+        lockDurationMs,
+      );
+
+      if (!lockAcquired) {
+        retryCount++;
+        if (retryCount < maxLockRetries) {
+          await new Promise((resolve) => setTimeout(resolve, lockRetryDelayMs));
+        }
+      }
+    }
+
     if (!lockAcquired) {
-      this.logger.warn(`Could not acquire lock for task ${taskId} - it may be processed by another worker`);
+      this.logger.warn({
+        message: `Could not acquire lock for task ${taskId} after ${maxLockRetries} attempts - it may be processed by another worker`,
+      });
+      await this.storageAdapter.failTask(taskId, 'LOCK_FAILED');
       return { success: false, reason: 'LOCK_FAILED' };
     }
-    
-    // Update task status to ACTIVE
-    taskRecord = await this.storageAdapter.updateTaskStatus(
-      taskId,
-      TaskStatus.ACTIVE,
-      { startedAt: new Date() },
-    );
-    
+
     // Create CloudTask instance
     const cloudTask = new CloudTask(taskRecord);
-    
+
     // Set up progress reporting
     if (processor.onProgress) {
       cloudTask.setProgressReporter(async (progress: number) => {
@@ -499,79 +617,62 @@ export class ConsumerService implements OnModuleInit {
           // Call onProgress handler
           await processor.instance[processor.onProgress](cloudTask, progress);
         } catch (error) {
-          this.logger.error(`Error in progress event handler: ${error.message}`, error.stack);
+          this.logger.error(error, {
+            message: `Error in progress event handler: ${error.message}`,
+          });
         }
       });
     }
-    
+
     try {
       // Call onActive handler if it exists
       if (processor.onActive) {
         try {
           await processor.instance[processor.onActive](cloudTask);
         } catch (error) {
-          this.logger.error(`Error in task active event handler: ${error.message}`, error.stack);
+          this.logger.error(error, {
+            message: `Error in task active event handler: ${error.message}`,
+          });
         }
       }
-      
-      // Process the task
-      const result = await processor.instance[processor.processMethod](cloudTask);
 
-      // Update task status to COMPLETED
-      await this.storageAdapter.updateTaskStatus(
-        taskId,
-        TaskStatus.COMPLETED,
-        { 
-          completedAt: new Date(),
-          // Release the lock
-          lockedUntil: undefined,
-          workerId: undefined, 
-        },
+      // Process the task
+      const result = await processor.instance[processor.processMethod](
+        cloudTask,
       );
 
       await this.storageAdapter.completeTask(taskId, result);
-      
+
       // Call onCompleted handler if it exists
       if (processor.onCompleted) {
         try {
           await processor.instance[processor.onCompleted](cloudTask, result);
         } catch (error) {
-          this.logger.error(`Error in task completed event handler: ${error.message}`, error.stack);
+          this.logger.error(error, {
+            message: `Error in task completed event handler: ${error.message}`,
+          });
         }
       }
-      
+
       return { success: true, result };
     } catch (error) {
       // Handle task processing error
       const failureReason = error.message || 'Unknown error';
-      
-      // Update task status to FAILED
-      await this.storageAdapter.updateTaskStatus(
-        taskId,
-        TaskStatus.FAILED,
-        { 
-          failureReason,
-          // Release the lock
-          lockedUntil: undefined,
-          workerId: undefined,
-          // Increment retry count
-          retryCount: (taskRecord.retryCount || 0) + 1, 
-        },
-      );
+      await this.storageAdapter.failTask(taskId, failureReason);
 
-      await this.storageAdapter.failTask(taskId, error);
-      
+      if (shouldHandleUniqueness) {
+        await this.storageAdapter.removeUniquenessKey(uniquenessKey);
+      }
       // Call onFailed handler if it exists
       if (processor.onFailed) {
         try {
           await processor.instance[processor.onFailed](cloudTask, error);
         } catch (handlerError) {
-          this.logger.error(`Error in task failed event handler: ${handlerError.message}`, handlerError.stack);
+          this.logger.error(handlerError, {
+            message: `Error in task failed event handler: ${handlerError.message}`,
+          });
         }
       }
-      
-      // Log the error
-      this.logger.error(`Error processing task ${taskId}: ${failureReason}`, error.stack);
 
       // Get the maxRetry value from metadata or use default
       const maxRetry = metadata?.maxRetry ?? 5; // Default to 5 if not specified
@@ -579,10 +680,16 @@ export class ConsumerService implements OnModuleInit {
 
       // Only re-throw the error (causing Cloud Tasks to retry) if we haven't exceeded maxRetry
       if (currentRetryCount <= maxRetry) {
-        this.logger.debug(`Retry ${currentRetryCount}/${maxRetry} for task ${taskId}`);
+        this.logger.debug({
+          message: `Retry ${currentRetryCount}/${maxRetry} for task ${taskId}`,
+        });
+        // Persist the incremented retry count before throwing
+        await this.storageAdapter.failTask(taskId, failureReason);
         throw error;
       } else {
-        this.logger.warn(`Task ${taskId} exceeded maximum retry attempts (${maxRetry}). Not retrying.`);
+        const message = `Task ${taskId} exceeded maximum retry attempts (${maxRetry}). Not retrying.`;
+        this.logger.warn({ message });
+        await this.storageAdapter.failTask(taskId, message);
         return { success: false, error: failureReason, maxRetryExceeded: true };
       }
     }

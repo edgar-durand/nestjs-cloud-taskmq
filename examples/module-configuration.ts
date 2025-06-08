@@ -1,9 +1,12 @@
 /**
  * Example of how to configure and register the CloudTaskMQ module in a NestJS application
  */
-import { Module } from '@nestjs/common';
+/**
+ * Example of a custom controller for handling Cloud Tasks requests
+ */
+import { Module, Post } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { CloudTaskMQModule } from '../src';
+import { CloudTaskConsumer, CloudTaskMQModule } from '../src';
 import { EmailProcessor } from './consumer-example';
 import { EmailService } from './producer-example';
 
@@ -20,7 +23,8 @@ import { EmailService } from './producer-example';
         {
           name: 'email-queue',
           path: 'projects/my-gcp-project/locations/us-central1/queues/email-queue',
-          serviceAccountEmail: 'cloud-tasks@my-gcp-project.iam.gserviceaccount.com',
+          serviceAccountEmail:
+            'cloud-tasks@my-gcp-project.iam.gserviceaccount.com',
         },
         {
           name: 'notification-queue',
@@ -65,20 +69,29 @@ export class StaticConfigTasksModule {}
         queues: [
           {
             name: 'email-queue',
-            path: `projects/${configService.get('GCP_PROJECT_ID')}/locations/${configService.get('GCP_LOCATION')}/queues/email-queue`,
+            path: `projects/${configService.get(
+              'GCP_PROJECT_ID',
+            )}/locations/${configService.get(
+              'GCP_LOCATION',
+            )}/queues/email-queue`,
             serviceAccountEmail: configService.get('GCP_SERVICE_ACCOUNT'),
           },
           {
             name: 'notification-queue',
-            path: `projects/${configService.get('GCP_PROJECT_ID')}/locations/${configService.get('GCP_LOCATION')}/queues/notification-queue`,
+            path: `projects/${configService.get(
+              'GCP_PROJECT_ID',
+            )}/locations/${configService.get(
+              'GCP_LOCATION',
+            )}/queues/notification-queue`,
           },
         ],
         storageAdapter: configService.get('STORAGE_ADAPTER') || 'mongo',
         storageOptions: {
           // MongoDB options
           mongoUri: configService.get('MONGODB_URI'),
-          collectionName: configService.get('TASKS_COLLECTION_NAME') || 'cloud_tasks',
-          
+          collectionName:
+            configService.get('TASKS_COLLECTION_NAME') || 'cloud_tasks',
+
           // Redis options (if using Redis adapter)
           redis: {
             host: configService.get('REDIS_HOST'),
@@ -86,7 +99,9 @@ export class StaticConfigTasksModule {}
             password: configService.get('REDIS_PASSWORD'),
           },
         },
-        lockDurationMs: parseInt(configService.get('TASK_LOCK_DURATION_MS') || '60000'),
+        lockDurationMs: parseInt(
+          configService.get('TASK_LOCK_DURATION_MS') || '60000',
+        ),
       }),
     }),
   ],
@@ -95,23 +110,16 @@ export class StaticConfigTasksModule {}
 })
 export class AsyncConfigTasksModule {}
 
-/**
- * Example of a custom controller for handling Cloud Tasks requests
- */
-import { Controller, Post, Body } from '@nestjs/common';
-import { CloudTaskConsumer } from '../src';
-
 @CloudTaskConsumer({
   queues: ['email-queue', 'notification-queue'],
   path: 'tasks', // Will be available at /tasks instead of the default /cloud-tasks
-  validateOidcToken: true,
+  includeOidcToken: true,
 })
 export class CustomTasksController {
   @Post()
-  async handleTask(@Body() body: any): Promise<any> {
+  async handleTask(): Promise<any> {
     // Additional custom logic before the task is processed by ConsumerService
-    console.log(`Received task ${body.taskId} for queue ${body.queueName}`);
-    
+
     // The actual processing is handled by the CloudTaskMQ library
     return { received: true };
   }
@@ -119,6 +127,7 @@ export class CustomTasksController {
 
 // Don't forget to register the controller in your module
 @Module({
+  // @ts-ignore
   imports: [CloudTaskMQModule.forRoot(/* ... */)],
   controllers: [CustomTasksController],
   providers: [EmailProcessor, EmailService],

@@ -7,45 +7,39 @@ export { ConsumerService } from './services/consumer.service';
 export { RateLimiterService } from './services/rate-limiter.service';
 
 // Interfaces
-export { 
-  CloudTaskMQConfig, 
-  CloudTaskMQAsyncConfig, 
+export {
+  CloudTaskMQConfig,
+  CloudTaskMQAsyncConfig,
   CloudTaskMQConfigFactory,
   QueueConfig,
-  RateLimiterOptions
+  RateLimiterOptions,
 } from './interfaces/config.interface';
-export { 
-  IStateStorageAdapter, 
-  TaskQueryOptions 
+export {
+  IStateStorageAdapter,
+  TaskQueryOptions,
 } from './interfaces/storage-adapter.interface';
-export { 
-  ITask, 
-  TaskStatus, 
-  AddTaskOptions, 
-  AddTaskResult 
+export {
+  ITask,
+  TaskStatus,
+  AddTaskOptions,
+  AddTaskResult,
 } from './interfaces/task.interface';
 
 // Models
 export { CloudTask } from './models/cloud-task.model';
 
 // Decorators
-export { 
-  Processor, 
-  ProcessorOptions 
-} from './decorators/processor.decorator';
-export { 
-  Process, 
-  ProcessOptions 
-} from './decorators/process.decorator';
-export { 
-  OnQueueActive, 
-  OnQueueCompleted, 
-  OnQueueFailed, 
-  OnQueueProgress 
+export { Processor, ProcessorOptions } from './decorators/processor.decorator';
+export { Process, ProcessOptions } from './decorators/process.decorator';
+export {
+  OnQueueActive,
+  OnQueueCompleted,
+  OnQueueFailed,
+  OnQueueProgress,
 } from './decorators/events.decorator';
-export { 
-  CloudTaskConsumer, 
-  CloudTaskConsumerOptions 
+export {
+  CloudTaskConsumer,
+  CloudTaskConsumerOptions,
 } from './decorators/cloud-task-consumer.decorator';
 
 // Storage Adapters (for extending)

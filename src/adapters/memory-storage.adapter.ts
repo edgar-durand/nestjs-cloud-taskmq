@@ -1,7 +1,10 @@
-import {Injectable, Logger} from '@nestjs/common';
-import { IStateStorageAdapter, TaskQueryOptions } from '../interfaces/storage-adapter.interface';
+import { Injectable, Logger } from '@nestjs/common';
+import {
+  IStateStorageAdapter,
+  TaskQueryOptions,
+} from '../interfaces/storage-adapter.interface';
 import { ITask, TaskStatus } from '../interfaces/task.interface';
-import {IRateLimiterBucket} from "../interfaces/rate-limiter.interface";
+import { IRateLimiterBucket } from '../interfaces/rate-limiter.interface';
 
 /**
  * In-memory storage adapter for CloudTaskMQ
@@ -9,10 +12,26 @@ import {IRateLimiterBucket} from "../interfaces/rate-limiter.interface";
  */
 @Injectable()
 export class MemoryStorageAdapter implements IStateStorageAdapter {
-  private tasks: Map<string, ITask & { lockedBy?: string; lockedUntil?: Date }> = new Map();
+  private tasks: Map<
+    string,
+    ITask & { lockedBy?: string; lockedUntil?: Date }
+  > = new Map();
   private readonly logger = new Logger(MemoryStorageAdapter.name);
   private cleanupTimeouts: Map<string, NodeJS.Timeout> = new Map();
   private rateLimiterBuckets: Map<string, IRateLimiterBucket> = new Map();
+  private uniquenessKeyBuckets: Map<string, boolean> = new Map();
+
+  async getUniquenessValue(key: string): Promise<boolean> {
+    return this.uniquenessKeyBuckets.get(key);
+  }
+
+  async saveUniquenessKey(key: string): Promise<void> {
+    this.uniquenessKeyBuckets.set(key, true);
+  }
+
+  async removeUniquenessKey(key: string): Promise<void> {
+    this.uniquenessKeyBuckets.delete(key);
+  }
 
   /**
    * Initialize the storage adapter
@@ -26,14 +45,16 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * @param task Task data to store
    * @returns The stored task with timestamps
    */
-  async createTask(task: Omit<ITask, 'createdAt' | 'updatedAt'>): Promise<ITask> {
+  async createTask(
+    task: Omit<ITask, 'createdAt' | 'updatedAt'>,
+  ): Promise<ITask> {
     const now = new Date();
     const newTask: ITask & { lockedBy?: string; lockedUntil?: Date } = {
       ...task,
       createdAt: now,
       updatedAt: now,
     };
-    
+
     this.tasks.set(task.taskId, newTask);
     return newTask;
   }
@@ -48,8 +69,9 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
     if (!task) {
       return null;
     }
-    
+
     // Return a clean task object without the extra fields
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { lockedBy, lockedUntil, ...cleanTask } = task;
     return cleanTask;
   }
@@ -62,15 +84,15 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * @returns The updated task or null if not found
    */
   async updateTaskStatus(
-    taskId: string, 
-    status: TaskStatus, 
-    additionalData?: Partial<ITask>
+    taskId: string,
+    status: TaskStatus,
+    additionalData?: Partial<ITask>,
   ): Promise<ITask | null> {
     const task = this.tasks.get(taskId);
     if (!task) {
       return null;
     }
-    
+
     const now = new Date();
     const updatedTask = {
       ...task,
@@ -79,10 +101,11 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
       updatedAt: now,
       taskId, // Ensure ID doesn't change
     };
-    
+
     this.tasks.set(taskId, updatedTask);
-    
+
     // Return a clean task object without the extra fields
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { lockedBy, lockedUntil, ...cleanTask } = updatedTask;
     return cleanTask;
   }
@@ -95,13 +118,15 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * @returns True if lock was acquired, false otherwise
    */
   async acquireTaskLock(
-    taskId: string, 
-    workerId: string, 
-    lockDurationMs: number
+    taskId: string,
+    workerId: string,
+    lockDurationMs: number,
   ): Promise<boolean> {
     const task = this.tasks.get(taskId);
     if (!task) {
-      this.logger.warn(`Failed to acquire lock for task ${taskId} - task does not exist`);
+      this.logger.warn(
+        `Failed to acquire lock for task ${taskId} - task does not exist`,
+      );
       return false;
     }
 
@@ -110,17 +135,19 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
       this.logger.debug(`Skipping already completed task ${taskId}`);
       return false;
     }
-    
+
     // Check if task is already locked
     if (task.lockedBy && task.lockedUntil && task.lockedUntil > new Date()) {
       // Task is locked by another worker
       if (task.lockedBy !== workerId) {
-        this.logger.debug(`Task ${taskId} is locked until ${task.lockedUntil} by worker ${task.lockedBy}`);
+        this.logger.debug(
+          `Task ${taskId} is locked until ${task.lockedUntil} by worker ${task.lockedBy}`,
+        );
         return false;
       }
       // Task is already locked by this worker, extend the lock
     }
-    
+
     // Acquire or extend the lock
     const lockUntil = new Date(Date.now() + lockDurationMs);
     task.lockedBy = workerId;
@@ -145,11 +172,11 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
     if (!task || task.lockedBy !== workerId) {
       return false;
     }
-    
+
     task.lockedBy = undefined;
     task.lockedUntil = undefined;
     task.updatedAt = new Date();
-    
+
     this.tasks.set(taskId, task);
     return true;
   }
@@ -161,47 +188,61 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    */
   async findTasks(options: TaskQueryOptions): Promise<ITask[]> {
     let results = Array.from(this.tasks.values());
-    
-    // Filter by queue name
-    if (options.queueName) {
-      results = results.filter(task => task.queueName === options.queueName);
-    }
-    
-    // Filter by status
-    if (options.status) {
-      results = results.filter(task => task.status === options.status);
-    }
-    
+
+    const { sort, skip = 0, limit = 10, ...rest } = options;
+
+    // Filter
+    results = results.filter((task) => {
+      const query = { ...rest };
+      for (const key of Object.keys(query)) {
+        const value = query[key];
+        if (task[key] !== value) {
+          return false;
+        }
+      }
+    });
+
     // Sort results
-    if (options.sort) {
-      const [field, direction] = Object.entries(options.sort)[0];
+    if (sort) {
+      const [field, direction] = Object.entries(sort)[0];
       results = results.sort((a, b) => {
         const aValue = a[field];
         const bValue = b[field];
         const multiplier = direction === 'asc' ? 1 : -1;
-        
+
         if (aValue instanceof Date && bValue instanceof Date) {
           return multiplier * (aValue.getTime() - bValue.getTime());
         }
-        
+
         if (typeof aValue === 'string' && typeof bValue === 'string') {
           return multiplier * aValue.localeCompare(bValue);
         }
-        
+
         return 0;
       });
     }
-    
+
     // Apply pagination
-    const skip = options.skip || 0;
-    const limit = options.limit || 10;
     const paginatedResults = results.slice(skip, skip + limit);
-    
+
     // Return clean task objects without the extra fields
-    return paginatedResults.map(task => {
+    return paginatedResults.map((task) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { lockedBy, lockedUntil, ...cleanTask } = task;
       return cleanTask;
     });
+  }
+
+  /**
+   * Find tasks matching the given criteria and have not active version of the task
+   * @param options Query options
+   * @returns Array of matching tasks
+   */
+  async findTasksWithoutActiveVersion(
+    options: TaskQueryOptions,
+  ): Promise<ITask[]> {
+    const results = await this.findTasks(options);
+    return results.filter((task) => task.status !== TaskStatus.ACTIVE);
   }
 
   /**
@@ -211,7 +252,7 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    */
   async countTasks(options: TaskQueryOptions): Promise<number> {
     let count = 0;
-    
+
     for (const task of this.tasks.values()) {
       if (
         (!options.queueName || task.queueName === options.queueName) &&
@@ -220,10 +261,10 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
         count++;
       }
     }
-    
+
     return count;
   }
-  
+
   /**
    * Delete a task by its ID
    * @param taskId ID of the task to delete
@@ -271,10 +312,14 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
 
     // Handle removal if configured
     if (updatedTask.metadata?.removeOnComplete !== undefined) {
-      await this.handleTaskCleanup(updatedTask, updatedTask.metadata.removeOnComplete);
+      await this.handleTaskCleanup(
+        updatedTask,
+        updatedTask.metadata.removeOnComplete,
+      );
     }
 
     // Return a clean task object without the extra fields
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { lockedBy, lockedUntil, ...cleanTask } = updatedTask;
     return cleanTask;
   }
@@ -304,10 +349,14 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
 
     // Handle removal if configured
     if (updatedTask.metadata?.removeOnFail !== undefined) {
-      await this.handleTaskCleanup(updatedTask, updatedTask.metadata.removeOnFail);
+      await this.handleTaskCleanup(
+        updatedTask,
+        updatedTask.metadata.removeOnFail,
+      );
     }
 
     // Return a clean task object without the extra fields
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { lockedBy, lockedUntil, ...cleanTask } = updatedTask;
     return cleanTask;
   }
@@ -317,7 +366,10 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * @param task Task to potentially clean up
    * @param removeOption Cleanup option (true, false, or seconds to wait)
    */
-  private async handleTaskCleanup(task: ITask, removeOption: boolean | number): Promise<void> {
+  private async handleTaskCleanup(
+    task: ITask,
+    removeOption: boolean | number,
+  ): Promise<void> {
     if (removeOption === false) {
       return; // Don't remove
     }
@@ -341,9 +393,13 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
       const timeout = setTimeout(async () => {
         try {
           await this.deleteTask(task.taskId);
-          this.logger.log(`Removed task ${task.taskId} after ${removeOption} seconds as configured`);
+          this.logger.log(
+            `Removed task ${task.taskId} after ${removeOption} seconds as configured`,
+          );
         } catch (error) {
-          this.logger.error(`Failed to clean up task ${task.taskId}: ${error.message}`);
+          this.logger.error(
+            `Failed to clean up task ${task.taskId}: ${error.message}`,
+          );
         } finally {
           // Clean up the timeout reference
           this.cleanupTimeouts.delete(task.taskId);
@@ -352,7 +408,9 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
 
       // Store the timeout reference
       this.cleanupTimeouts.set(task.taskId, timeout);
-      this.logger.log(`Scheduled removal of task ${task.taskId} in ${removeOption} seconds`);
+      this.logger.log(
+        `Scheduled removal of task ${task.taskId} in ${removeOption} seconds`,
+      );
     }
   }
 
@@ -368,12 +426,14 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * Save a rate limiter bucket
    * @param bucket The rate limiter bucket to save
    */
-  async saveRateLimiterBucket(bucket: IRateLimiterBucket): Promise<IRateLimiterBucket> {
+  async saveRateLimiterBucket(
+    bucket: IRateLimiterBucket,
+  ): Promise<IRateLimiterBucket> {
     const now = new Date();
     const updatedBucket: IRateLimiterBucket = {
       ...bucket,
       updatedAt: now,
-      createdAt: bucket.createdAt || now
+      createdAt: bucket.createdAt || now,
     };
 
     this.rateLimiterBuckets.set(bucket.key, updatedBucket);
