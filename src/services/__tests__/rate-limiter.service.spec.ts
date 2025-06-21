@@ -28,6 +28,7 @@ describe('RateLimiterService', () => {
       saveUniquenessKey: jest.fn(),
       getUniquenessValue: jest.fn(),
       removeUniquenessKey: jest.fn(),
+      findTasksWithoutActiveVersion: jest.fn(),
     } as jest.Mocked<IStateStorageAdapter>;
 
     const module: TestingModule = await Test.createTestingModule({

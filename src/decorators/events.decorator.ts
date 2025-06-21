@@ -3,10 +3,10 @@ import { SetMetadata } from '@nestjs/common';
 /**
  * Metadata keys for various queue lifecycle events
  */
-export const ON_QUEUE_ACTIVE_KEY = 'cloud_taskmq:on_queue_active';
-export const ON_QUEUE_COMPLETED_KEY = 'cloud_taskmq:on_queue_completed';
-export const ON_QUEUE_FAILED_KEY = 'cloud_taskmq:on_queue_failed';
-export const ON_QUEUE_PROGRESS_KEY = 'cloud_taskmq:on_queue_progress';
+export const ON_TASK_ACTIVE_KEY = 'cloud_taskmq:on_task_active';
+export const ON_TASK_COMPLETED_KEY = 'cloud_taskmq:on_task_completed';
+export const ON_TASK_FAILED_KEY = 'cloud_taskmq:on_task_failed';
+export const ON_TASK_PROGRESS_KEY = 'cloud_taskmq:on_task_progress';
 
 /**
  * Marks a method to be called when a task becomes active (starts processing).
@@ -21,16 +21,16 @@ export const ON_QUEUE_PROGRESS_KEY = 'cloud_taskmq:on_queue_progress';
  *     return { success: true };
  *   }
  *
- *   @OnQueueActive()
+ *   @OnTaskActive()
  *   onActive(task: CloudTask) {
  *     console.log(`Processing job ${task.id} from ${task.queueName}`);
  *   }
  * }
  * ```
  */
-export function OnQueueActive() {
+export function OnTaskActive() {
   return (target: any, propertyKey: string, descriptor: PropertyDescriptor) => {
-    SetMetadata(ON_QUEUE_ACTIVE_KEY, {
+    SetMetadata(ON_TASK_ACTIVE_KEY, {
       methodName: propertyKey,
     })(descriptor.value);
     return descriptor;
@@ -50,16 +50,16 @@ export function OnQueueActive() {
  *     return { success: true };
  *   }
  *
- *   @OnQueueCompleted()
+ *   @OnTaskCompleted()
  *   onCompleted(task: CloudTask, result: any) {
  *     console.log(`Job ${task.id} completed with result:`, result);
  *   }
  * }
  * ```
  */
-export function OnQueueCompleted() {
+export function OnTaskCompleted() {
   return (target: any, propertyKey: string, descriptor: PropertyDescriptor) => {
-    SetMetadata(ON_QUEUE_COMPLETED_KEY, {
+    SetMetadata(ON_TASK_COMPLETED_KEY, {
       methodName: propertyKey,
     })(descriptor.value);
     return descriptor;
@@ -79,16 +79,16 @@ export function OnQueueCompleted() {
  *     throw new Error('Email sending failed');
  *   }
  *
- *   @OnQueueFailed()
+ *   @OnTaskFailed()
  *   onFailed(task: CloudTask, error: Error) {
  *     console.error(`Job ${task.id} failed with error:`, error);
  *   }
  * }
  * ```
  */
-export function OnQueueFailed() {
+export function OnTaskFailed() {
   return (target: any, propertyKey: string, descriptor: PropertyDescriptor) => {
-    SetMetadata(ON_QUEUE_FAILED_KEY, {
+    SetMetadata(ON_TASK_FAILED_KEY, {
       methodName: propertyKey,
     })(descriptor.value);
     return descriptor;
@@ -109,16 +109,16 @@ export function OnQueueFailed() {
  *     return { success: true };
  *   }
  *
- *   @OnQueueProgress()
+ *   @OnTaskProgress()
  *   onProgress(task: CloudTask, progress: number) {
  *     console.log(`Job ${task.id} is ${progress}% complete`);
  *   }
  * }
  * ```
  */
-export function OnQueueProgress() {
+export function OnTaskProgress() {
   return (target: any, propertyKey: string, descriptor: PropertyDescriptor) => {
-    SetMetadata(ON_QUEUE_PROGRESS_KEY, {
+    SetMetadata(ON_TASK_PROGRESS_KEY, {
       methodName: propertyKey,
     })(descriptor.value);
     return descriptor;

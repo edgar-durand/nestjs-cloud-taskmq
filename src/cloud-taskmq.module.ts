@@ -74,6 +74,10 @@ function validateConfig(config: CloudTaskMQConfig): void {
       throw new Error('Each queue must have a name and path');
     }
   }
+
+  if (config.pullingInterval) {
+    process.env.CTMQ_PULLING_INTERVAL = `${config.pullingInterval}`;
+  }
 }
 
 /**

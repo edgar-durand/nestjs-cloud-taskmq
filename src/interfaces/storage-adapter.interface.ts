@@ -130,4 +130,27 @@ export interface IStateStorageAdapter {
   getUniquenessValue(key: string): Promise<boolean>;
   saveUniquenessKey(key: string): Promise<void>;
   removeUniquenessKey(key: string): Promise<void>;
+
+  // Chain management methods
+  /**
+   * Check if a chain has an active task (task in progress)
+   * @param chainId The unique chain identifier
+   * @returns true if there's an active task in the chain, false otherwise
+   */
+  hasActiveTaskInChain(chainId: string): Promise<boolean>;
+
+  /**
+   * Get the next task to execute in a chain (lowest chainOrder that is idle)
+   * @param chainId The unique chain identifier
+   * @returns The next task to execute or null if no idle tasks in chain
+   */
+  getNextTaskInChain(chainId: string): Promise<ITask | null>;
+
+  /**
+   * Find tasks by chain ID ordered by chain order
+   * @param chainId The unique chain identifier
+   * @param status Optional status filter
+   * @returns Array of tasks in the chain sorted by chainOrder
+   */
+  findTasksByChainId(chainId: string, status?: TaskStatus): Promise<ITask[]>;
 }

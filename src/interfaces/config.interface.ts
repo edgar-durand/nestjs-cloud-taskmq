@@ -80,6 +80,25 @@ export interface CloudTaskMQConfig {
   defaultProcessorUrl?: string;
 
   /**
+   * Maximum number of tasks to pull in a given pullingInterval across all queues for sending to GCP Cloud Task queues.
+   * This value is automatically distributed among configured queues to ensure fair throttling.
+   * @see pullingInterval
+   *
+   * @default 100000 - Based on GCP Cloud Tasks API rate limit of 100,000 requests/second per project
+   * @example 50000 - pull up to 50,000 tasks per second
+   * @link https://cloud.google.com/tasks/docs/quotas
+   */
+  maxTasksToPull?: number;
+
+  /**
+   * Represents the time interval, in milliseconds, at which maxTasksToPull should occur.
+   *
+   * @default 1000
+   * @see maxTasksToPull
+   */
+  pullingInterval?: number;
+
+  /**
    * List of queues to register with the library
    */
   queues: QueueConfig[];

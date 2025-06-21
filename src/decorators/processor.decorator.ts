@@ -16,6 +16,7 @@ export const PROCESSOR_METADATA_KEY = 'cloud_taskmq:processor_metadata';
 export interface ProcessorOptions {
   /**
    * Concurrency limit (how many tasks can be processed simultaneously)
+   * @ignore Not implemented
    */
   concurrency?: number;
 

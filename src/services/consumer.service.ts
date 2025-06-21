@@ -11,10 +11,10 @@ import {
   ProcessOptions,
 } from '../decorators/process.decorator';
 import {
-  ON_QUEUE_ACTIVE_KEY,
-  ON_QUEUE_COMPLETED_KEY,
-  ON_QUEUE_FAILED_KEY,
-  ON_QUEUE_PROGRESS_KEY,
+  ON_TASK_ACTIVE_KEY,
+  ON_TASK_COMPLETED_KEY,
+  ON_TASK_FAILED_KEY,
+  ON_TASK_PROGRESS_KEY,
 } from '../decorators/events.decorator';
 import { IStateStorageAdapter } from '../interfaces/storage-adapter.interface';
 import { AddTaskOptions, TaskStatus } from '../interfaces/task.interface';
@@ -155,16 +155,16 @@ export class ConsumerService implements OnModuleInit {
         }
 
         // Check if method is an event handler
-        if (Reflect.getMetadata(ON_QUEUE_ACTIVE_KEY, handler)) {
+        if (Reflect.getMetadata(ON_TASK_ACTIVE_KEY, handler)) {
           onActive = methodName;
         }
-        if (Reflect.getMetadata(ON_QUEUE_COMPLETED_KEY, handler)) {
+        if (Reflect.getMetadata(ON_TASK_COMPLETED_KEY, handler)) {
           onCompleted = methodName;
         }
-        if (Reflect.getMetadata(ON_QUEUE_FAILED_KEY, handler)) {
+        if (Reflect.getMetadata(ON_TASK_FAILED_KEY, handler)) {
           onFailed = methodName;
         }
-        if (Reflect.getMetadata(ON_QUEUE_PROGRESS_KEY, handler)) {
+        if (Reflect.getMetadata(ON_TASK_PROGRESS_KEY, handler)) {
           onProgress = methodName;
         }
       }
@@ -322,7 +322,7 @@ export class ConsumerService implements OnModuleInit {
       await this.storageAdapter.releaseTaskLock(taskId, this.workerId);
       if (
         typeof originalTask?.metadata.uniquenessKey === 'string' &&
-        originalTask?.metadata.uniquenessKey !== 'undefined'
+        originalTask?.metadata?.uniquenessKey !== 'undefined'
       ) {
         await this.storageAdapter.removeUniquenessKey(
           originalTask?.metadata?.uniquenessKey,
@@ -472,12 +472,6 @@ export class ConsumerService implements OnModuleInit {
         this.logger.warn({
           message: `Uniqueness key ${uniquenessKey} exists. Skipping task.`,
         });
-        try {
-          await this.storageAdapter.failTask(
-            taskId,
-            `Uniqueness key ${uniquenessKey} already exists`,
-          );
-        } catch {}
         return;
       } else {
         try {

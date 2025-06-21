@@ -123,10 +123,35 @@ export interface ITask {
   metadata?: TaskMetadata;
 
   /**
+   * Chain ID if this task is part of a chain
+   */
+  chainId?: string;
+
+  /**
+   * Order within the chain
+   */
+  chainOrder?: number;
+
+  /**
    * When the document should be automatically removed by MongoDB TTL index
    * This is used internally by storage adapters for automatic cleanup
    */
   expireAt?: Date;
+}
+
+/**
+ * Chain options for task sequencing
+ */
+export interface ChainOptions {
+  /**
+   * Unique identifier for the chain - tasks with the same chainId will be executed sequentially
+   */
+  chainId: string;
+
+  /**
+   * Order within the chain - tasks will be executed in ascending order of chainOrder
+   */
+  chainOrder: number;
 }
 
 /**
@@ -147,6 +172,11 @@ export interface AddTaskOptions {
 
   /**
    * When to schedule the task. If not provided, the task is scheduled immediately.
+   *
+   * ⚠️ **Important**: When used with `chainOptions`, this bypasses the normal
+   * chaining mechanism. The task will be sent directly to GCP Cloud Tasks with
+   * the specified schedule time, rather than waiting for its turn in the chain.
+   * This is primarily used for rate-limited retries of chain tasks.
    */
   scheduleTime?: Date;
 
@@ -186,6 +216,32 @@ export interface AddTaskOptions {
   maxRetry?: number;
 
   audience?: string;
+
+  /**
+   * Determines whether buffering should be skipped during a certain operation.
+   * If set to `true`, the involved process or operation bypasses buffering mechanisms,
+   * potentially improving real-time performance or reducing latency. If `false`,
+   * buffering may occur as per the implementation specifics.
+   *
+   * This property is optional, and it's defaulted to false
+   */
+  skipBuffering?: boolean;
+
+  /**
+   * Chain options for sequential task execution
+   * Tasks with the same chainId will be executed one at a time in chainOrder
+   *
+   * **Chain Task Flow**:
+   * - Chain tasks start with IDLE status and use polling mechanism
+   * - Only one task per chain can be ACTIVE at a time
+   * - Next task in chain is activated when previous completes/fails
+   *
+   * ⚠️ **Important**: If combined with `scheduleTime`, the task will bypass
+   * normal chain ordering and be sent directly to GCP Cloud Tasks. This breaks
+   * the sequential execution guarantee and should only be used for specific
+   * scenarios like rate-limited retries.
+   */
+  chainOptions?: ChainOptions;
 }
 
 /**

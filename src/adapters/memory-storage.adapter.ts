@@ -186,7 +186,7 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    * @param options Query options
    * @returns Array of matching tasks
    */
-  async findTasks(options: TaskQueryOptions): Promise<ITask[]> {
+  async findTasks(options: Partial<TaskQueryOptions>): Promise<ITask[]> {
     let results = Array.from(this.tasks.values());
 
     const { sort, skip = 0, limit = 10, ...rest } = options;
@@ -200,6 +200,7 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
           return false;
         }
       }
+      return true;
     });
 
     // Sort results
@@ -446,5 +447,73 @@ export class MemoryStorageAdapter implements IStateStorageAdapter {
    */
   async deleteRateLimiterBucket(key: string): Promise<boolean> {
     return this.rateLimiterBuckets.delete(key);
+  }
+
+  /**
+   * Check if a chain has an active task (task in progress)
+   * @param chainId The unique chain identifier
+   * @returns true if there's an active task in the chain, false otherwise
+   */
+  async hasActiveTaskInChain(chainId: string): Promise<boolean> {
+    for (const [, task] of this.tasks) {
+      if (task.chainId === chainId && task.status === TaskStatus.ACTIVE) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Get the next task to execute in a chain (lowest chainOrder that is idle)
+   * @param chainId The unique chain identifier
+   * @returns The next task to execute or null if no idle tasks in chain
+   */
+  async getNextTaskInChain(chainId: string): Promise<ITask | null> {
+    const idleTasks: ITask[] = [];
+
+    for (const [, task] of this.tasks) {
+      if (task.chainId === chainId && task.status === TaskStatus.IDLE) {
+        // Remove extra fields for clean task object
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { lockedBy, lockedUntil, ...cleanTask } = task as any;
+        idleTasks.push(cleanTask);
+      }
+    }
+
+    if (idleTasks.length === 0) {
+      return null;
+    }
+
+    // Sort by chainOrder and return the first one
+    idleTasks.sort((a, b) => (a.chainOrder || 0) - (b.chainOrder || 0));
+    return idleTasks[0];
+  }
+
+  /**
+   * Find tasks by chain ID ordered by chain order
+   * @param chainId The unique chain identifier
+   * @param status Optional status filter
+   * @returns Array of tasks in the chain sorted by chainOrder
+   */
+  async findTasksByChainId(
+    chainId: string,
+    status?: TaskStatus,
+  ): Promise<ITask[]> {
+    const chainTasks: ITask[] = [];
+
+    for (const [, task] of this.tasks) {
+      if (task.chainId === chainId) {
+        if (!status || task.status === status) {
+          // Remove extra fields for clean task object
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { lockedBy, lockedUntil, ...cleanTask } = task as any;
+          chainTasks.push(cleanTask);
+        }
+      }
+    }
+
+    // Sort by chainOrder
+    chainTasks.sort((a, b) => (a.chainOrder || 0) - (b.chainOrder || 0));
+    return chainTasks;
   }
 }

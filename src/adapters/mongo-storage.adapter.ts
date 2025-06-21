@@ -34,6 +34,9 @@ export const TaskSchema = new Schema<ITask>(
     workerId: { type: String },
     metadata: { type: Schema.Types.Mixed, default: {} },
     expireAt: { type: Date },
+    // Chain task fields
+    chainId: { type: String, index: true },
+    chainOrder: { type: Number, index: true },
   },
   {
     timestamps: true, // Adds createdAt and updatedAt automatically
@@ -216,6 +219,16 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
         this.taskModel.collection.createIndex({ 'metadata.retryCount': 1 }),
         this.taskModel.collection.createIndex(
           { lockedUntil: 1 },
+          { sparse: true },
+        ),
+        // Chain-related indexes
+        this.taskModel.collection.createIndex({ chainId: 1 }, { sparse: true }),
+        this.taskModel.collection.createIndex(
+          { chainId: 1, chainOrder: 1 },
+          { sparse: true },
+        ),
+        this.taskModel.collection.createIndex(
+          { chainId: 1, status: 1 },
           { sparse: true },
         ),
       ];
@@ -410,7 +423,7 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
   /**
    * Find tasks matching the given criteria
    */
-  async findTasks(options: TaskQueryOptions): Promise<ITask[]> {
+  async findTasks(options: Partial<TaskQueryOptions>): Promise<ITask[]> {
     const {
       skip = 0,
       limit = 100,
@@ -536,7 +549,7 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
    * @param taskId ID of the task to mark as failed
    * @param error Error message
    */
-  async failTask(taskId: string, error: string): Promise<ITask> {
+  async failTask(taskId: string, error: string): Promise<ITask | null> {
     const task = await this.taskModel
       .findOneAndUpdate(
         { taskId },
@@ -553,7 +566,8 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
       .exec();
 
     if (!task) {
-      throw new Error(`Task ${taskId} not found`);
+      this.logger.error(new Error(`Task ${taskId} not found`));
+      return;
     }
 
     // Handle removeOnFail if defined in task metadata
@@ -686,6 +700,83 @@ export class MongoStorageAdapter implements IStateStorageAdapter {
     } catch (error) {
       this.logger.error(error, {
         message: `Error deleting rate limiter bucket: ${error.message}`,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a chain has an active task (task in progress)
+   * @param chainId The unique chain identifier
+   * @returns true if there's an active task in the chain, false otherwise
+   */
+  async hasActiveTaskInChain(chainId: string): Promise<boolean> {
+    try {
+      const activeTask = await this.taskModel
+        .findOne({
+          chainId,
+          status: TaskStatus.ACTIVE,
+        })
+        .exec();
+
+      return !!activeTask;
+    } catch (error) {
+      this.logger.error(error, {
+        message: `Error checking for active tasks in chain ${chainId}: ${error.message}`,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get the next task to execute in a chain (lowest chainOrder that is idle)
+   * @param chainId The unique chain identifier
+   * @returns The next task to execute or null if no idle tasks in chain
+   */
+  async getNextTaskInChain(chainId: string): Promise<ITask | null> {
+    try {
+      const nextTask = await this.taskModel
+        .findOne({
+          chainId,
+          status: TaskStatus.IDLE,
+        })
+        .sort({ chainOrder: 1 })
+        .exec();
+      return nextTask;
+    } catch (error) {
+      this.logger.error(error, {
+        message: `Error getting next task in chain ${chainId}: ${error.message}`,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Find tasks by chain ID ordered by chain order
+   * @param chainId The unique chain identifier
+   * @param status Optional status filter
+   * @returns Array of tasks in the chain sorted by chainOrder
+   */
+  async findTasksByChainId(
+    chainId: string,
+    status?: TaskStatus,
+  ): Promise<ITask[]> {
+    try {
+      const query: FilterQuery<ITask> = { chainId };
+
+      if (status) {
+        query.status = status;
+      }
+
+      const tasks = await this.taskModel
+        .find(query)
+        .sort({ chainOrder: 1 })
+        .exec();
+
+      return tasks;
+    } catch (error) {
+      this.logger.error(error, {
+        message: `Error finding tasks in chain ${chainId}: ${error.message}`,
       });
       throw error;
     }

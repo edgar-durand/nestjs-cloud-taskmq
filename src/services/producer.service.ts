@@ -17,8 +17,15 @@ import {
 } from '../decorators/cloud-task-consumer.decorator';
 import { DiscoveryService } from '@nestjs/core';
 import { Interval } from '@nestjs/schedule';
+import * as async from 'async';
 import { google } from '@google-cloud/tasks/build/protos/protos';
 import ICreateTaskRequest = google.cloud.tasks.v2.ICreateTaskRequest;
+
+const getPullingInterval = () => {
+  const RANDOM_TIME = Math.random() * 2000;
+  const pullingInterval = parseInt(process.env.CTMQ_PULLING_INTERVAL) || 1000;
+  return pullingInterval + RANDOM_TIME;
+};
 
 @Injectable()
 export class ProducerService implements OnModuleInit {
@@ -30,7 +37,9 @@ export class ProducerService implements OnModuleInit {
   private defaultProcessorUrl?: string;
   private controllerMetadata: Map<string, CloudTaskConsumerOptions> = new Map();
 
-  private BUFFER_SIZE: number;
+  private GENERAL_PULLING_BUFFER_SIZE: number;
+
+  private isChildInstance = false;
 
   constructor(
     private readonly config: CloudTaskMQConfig,
@@ -48,7 +57,8 @@ export class ProducerService implements OnModuleInit {
       this.queueConfigs.set(queueConfig.name, queueConfig);
     }
 
-    this.BUFFER_SIZE = 100 / config.queues.length;
+    this.GENERAL_PULLING_BUFFER_SIZE = config.maxTasksToPull ?? 100_000;
+    this.isChildInstance = !!process.env.CTMQ_IS_CHILD_INSTANCE;
   }
 
   /**
@@ -359,65 +369,177 @@ export class ProducerService implements OnModuleInit {
 
     // Generate a unique task ID
     const taskId = options.taskId || uuidv4();
+    const skipBuffering = options.skipBuffering ?? false;
+
+    // Determine initial task status
+    let initialStatus: TaskStatus;
+
+    if (skipBuffering || options.scheduleTime) {
+      initialStatus = TaskStatus.ACTIVE;
+    } else {
+      // All tasks start as IDLE by default (chain logic handled in filterEligibleTasks)
+      initialStatus = TaskStatus.IDLE;
+    }
 
     // Create a record in the storage adapter
     const taskRecord: Omit<ITask, 'createdAt' | 'updatedAt'> = {
       taskId,
       queueName,
-      status: TaskStatus.IDLE,
+      status: initialStatus,
       payload,
       metadata: taskMetadata,
+      chainId: options.chainOptions?.chainId,
+      chainOrder: options.chainOptions?.chainOrder,
     };
 
     const savedTask = await this.storageAdapter.createTask(taskRecord);
 
-    return {
-      taskId: savedTask.taskId,
-      queueName: savedTask.queueName,
-      createdAt: savedTask.createdAt,
-    };
+    const isChainTask = !!options.chainOptions;
+    const shouldSendImmediately = skipBuffering || options.scheduleTime;
+
+    // Log warning when chainOptions is combined with scheduleTime
+    if (isChainTask && options.scheduleTime) {
+      this.logger.warn(
+        `Task ${taskId} has both chainOptions and scheduleTime. This will bypass normal chain ordering and send directly to GCP.`,
+        {
+          taskId,
+          chainId: options.chainOptions?.chainId,
+          chainOrder: options.chainOptions?.chainOrder,
+        },
+      );
+    }
+
+    // Chain tasks should be sent immediately only if they have scheduleTime (rate-limited retries)
+    // Regular chain tasks without scheduleTime use polling for proper chain ordering
+    if (shouldSendImmediately && (!isChainTask || options.scheduleTime)) {
+      await this.sendTaskToGcp(queueName, payload, options);
+    }
+
+    return savedTask;
   }
 
   /**
    * Periodically retrieves tasks from storage, processes them,
    * and sends them to the configured Google Cloud Platform (GCP) task queues.
    * This operation is performed at fixed intervals to handle buffered tasks effectively.
-   *
-   * 100 requests per second per project is the Rate Limit for GCP Cloud Task (API Calls)
+   * 100 000 requests per second per project is the Rate Limit for GCP Cloud Task (API Calls)
    *
    * @return {Promise<void>} Resolves when all tasks have been processed and sent successfully.
    *                         Logs any errors encountered during the process.
    */
-  @Interval(10_000)
+  @Interval(getPullingInterval())
   async sendBufferTasks(): Promise<void> {
+    if (this.isChildInstance) {
+      return;
+    }
     const queues = this.config.queues.map((q) => q.name);
-    for (const queue of queues) {
-      try {
-        const tasks = await this.storageAdapter.findTasksWithoutActiveVersion({
-          queueName: queue,
-          status: TaskStatus.IDLE,
-          limit: this.BUFFER_SIZE,
-          sort: { updatedAt: 'asc' },
-        });
-        if (tasks.length > 0) {
-          const promises = tasks.map(async (task) => {
-            await this.storageAdapter.updateTaskStatus(
-              task.taskId,
-              TaskStatus.ACTIVE,
-              {},
-            );
-            await this.sendTaskToGcp(
-              task.queueName,
-              task.payload,
-              task.metadata as AddTaskOptions,
-            );
-          });
-          await Promise.all(promises);
+    const bufferSize =
+      this.GENERAL_PULLING_BUFFER_SIZE / Math.max(1, queues.length);
+
+    const CONCURRENT_QUEUES = 5 as const;
+
+    await this.handlePromises(
+      queues.map((q) => ({ queue: q, bufferSize })),
+      this.handlePulledQueue.bind(this),
+      CONCURRENT_QUEUES,
+    );
+  }
+
+  async handlePulledQueue(args: {
+    queue: string;
+    bufferSize: number;
+  }): Promise<void> {
+    const { queue, bufferSize } = args;
+    try {
+      const tasks = await this.storageAdapter.findTasksWithoutActiveVersion({
+        queueName: queue,
+        status: TaskStatus.IDLE,
+        limit: bufferSize,
+        sort: { updatedAt: 'asc' },
+      });
+
+      if (tasks.length > 0) {
+        // Filter tasks that can be processed based on chain constraints
+        const eligibleTasks = await this.filterEligibleTasks(tasks);
+
+        if (eligibleTasks.length > 0) {
+          const CONCURRENT_TASKS = 5 as const;
+          await this.handlePromises(
+            eligibleTasks,
+            this.handlePulledTask.bind(this),
+            CONCURRENT_TASKS,
+          );
         }
-      } catch (e) {
-        this.logger.error(e);
+      }
+    } catch (e) {
+      this.logger.error(e);
+    }
+  }
+
+  async handlePulledTask(task: ITask): Promise<void> {
+    try {
+      await this.storageAdapter.updateTaskStatus(
+        task.taskId,
+        TaskStatus.ACTIVE,
+        {},
+      );
+      await this.sendTaskToGcp(
+        task.queueName,
+        task.payload,
+        task.metadata as AddTaskOptions,
+      );
+    } catch (e) {
+      this.logger.error(e);
+      await this.storageAdapter.updateTaskStatus(
+        task.taskId,
+        TaskStatus.IDLE,
+        {},
+      );
+    }
+  }
+
+  /**
+   * Filter tasks based on chain constraints
+   * @param tasks Array of tasks to filter
+   * @returns Array of tasks that can be processed
+   */
+  private async filterEligibleTasks(tasks: ITask[]): Promise<ITask[]> {
+    const eligibleTasks: ITask[] = [];
+    const checkedChains = new Set<string>();
+
+    for (const task of tasks) {
+      if (!task.chainId) {
+        // Non-chained tasks are always eligible
+        eligibleTasks.push(task);
+        continue;
+      }
+
+      // Check chain constraints only once per chainId
+      if (checkedChains.has(task.chainId)) {
+        continue;
+      }
+
+      checkedChains.add(task.chainId);
+
+      // Check if chain has active tasks
+      const hasActiveTask = await this.storageAdapter.hasActiveTaskInChain(
+        task.chainId,
+      );
+
+      if (!hasActiveTask) {
+        // Get the next task to execute in this chain
+        const nextTask = await this.storageAdapter.getNextTaskInChain(
+          task.chainId,
+        );
+
+        if (nextTask) {
+          // This is the next task to execute in the chain
+          eligibleTasks.push(task);
+        }
       }
     }
+
+    return eligibleTasks;
   }
 
   /**
@@ -521,5 +643,133 @@ export class ProducerService implements OnModuleInit {
     }
 
     return result;
+  }
+
+  /**
+   * Complete a task and potentially trigger the next task in chain
+   * @param taskId ID of the task to complete
+   * @param result Optional result data
+   * @returns The completed task
+   */
+  async completeTask(taskId: string, result?: any): Promise<ITask> {
+    const completedTask = await this.storageAdapter.completeTask(
+      taskId,
+      result,
+    );
+
+    // If this task was part of a chain, check for next task
+    if (completedTask.chainId) {
+      await this.processNextChainTask(completedTask.chainId);
+    }
+
+    return completedTask;
+  }
+
+  /**
+   * Fail a task and potentially trigger the next task in chain if configured to continue on failure
+   * @param taskId ID of the task to fail
+   * @param error Error information
+   * @returns The failed task
+   */
+  async failTask(taskId: string, error: any): Promise<ITask> {
+    const failedTask = await this.storageAdapter.failTask(taskId, error);
+
+    // If this task was part of a chain, check for next task
+    // Note: In this implementation, chain continues even if a task fails
+    // This behavior could be made configurable in the future
+    if (failedTask.chainId) {
+      await this.processNextChainTask(failedTask.chainId);
+    }
+
+    return failedTask;
+  }
+
+  /**
+   * Process the next task in a chain after a task completes or fails
+   * @param chainId The chain identifier
+   */
+  private async processNextChainTask(chainId: string): Promise<void> {
+    try {
+      // Check if there are any active tasks in the chain
+      const hasActiveTask = await this.storageAdapter.hasActiveTaskInChain(
+        chainId,
+      );
+
+      if (!hasActiveTask) {
+        // Get the next task to execute
+        const nextTask = await this.storageAdapter.getNextTaskInChain(chainId);
+
+        if (nextTask) {
+          this.logger.debug(
+            `Processing next task in chain ${chainId}: ${nextTask.taskId}`,
+          );
+
+          // Mark as active and send to GCP
+          await this.storageAdapter.updateTaskStatus(
+            nextTask.taskId,
+            TaskStatus.ACTIVE,
+            {},
+          );
+
+          // Send the task to GCP Cloud Tasks
+          await this.sendTaskToGcp(nextTask.queueName, nextTask.payload, {
+            taskId: nextTask.taskId,
+            chainOptions: {
+              chainId: nextTask.chainId,
+              chainOrder: nextTask.chainOrder,
+            },
+            // Include any metadata that was stored with the task
+            ...nextTask.metadata,
+          });
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error processing next chain task for chain ${chainId}:`,
+        error,
+      );
+    }
+  }
+
+  /**
+   * Get all tasks in a chain ordered by chain order
+   * @param chainId The chain identifier
+   * @param status Optional status filter
+   * @returns Array of tasks in the chain
+   */
+  async getChainTasks(chainId: string, status?: TaskStatus): Promise<ITask[]> {
+    return await this.storageAdapter.findTasksByChainId(chainId, status);
+  }
+
+  /**
+   * @description Handle promises concurrently, you can control the number of concurrent promises, have the results and the errors in a single call
+   * @returns { Promise<[ReturnType[], { item: InputType; details: string }[]>}
+   * @param args
+   * @param handler
+   * @param concurrently
+   */
+  async handlePromises<InputType, ReturnType>(
+    args: InputType[],
+    handler: (arg: InputType) => Promise<ReturnType>,
+    concurrently = 2,
+  ): Promise<[ReturnType[], { item: InputType; details: string }[]]> {
+    return new Promise((resolve) => {
+      const results: ReturnType[] = [];
+      const errors: { item: InputType; details: string }[] = [];
+      async.eachOfLimit(
+        args as async.IterableCollection<InputType>,
+        concurrently,
+        async (item: InputType, index: number) => {
+          try {
+            results[index] = await handler(item);
+          } catch (error) {
+            errors.push({ item, details: error.message });
+          }
+        },
+        () => {
+          resolve([results, errors]);
+        },
+      );
+    });
   }
 }

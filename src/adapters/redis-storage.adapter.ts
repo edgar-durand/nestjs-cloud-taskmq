@@ -126,6 +126,11 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
     if (task.workerId) serialized.workerId = task.workerId;
     if (task.metadata) serialized.metadata = JSON.stringify(task.metadata);
 
+    // Handle chain fields
+    if (task.chainId) serialized.chainId = task.chainId;
+    if (task.chainOrder !== undefined)
+      serialized.chainOrder = String(task.chainOrder);
+
     return serialized;
   }
 
@@ -149,6 +154,10 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
     if (data.lockedUntil) task.lockedUntil = new Date(data.lockedUntil);
     if (data.workerId) task.workerId = data.workerId;
     if (data.metadata) task.metadata = JSON.parse(data.metadata);
+
+    // Handle chain fields
+    if (data.chainId) task.chainId = data.chainId;
+    if (data.chainOrder) task.chainOrder = parseInt(data.chainOrder, 10);
 
     return task as ITask;
   }
@@ -331,7 +340,7 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
   /**
    * Find tasks matching the given criteria
    */
-  async findTasks(options: TaskQueryOptions): Promise<ITask[]> {
+  async findTasks(options: Partial<TaskQueryOptions>): Promise<ITask[]> {
     const { skip = 0, limit = 100, ...rest } = options;
     const query = { ...rest };
 
@@ -715,6 +724,134 @@ export class RedisStorageAdapter implements IStateStorageAdapter {
         error.stack,
       );
       return false;
+    }
+  }
+
+  /**
+   * Check if a chain has an active task (task in progress)
+   * @param chainId The unique chain identifier
+   * @returns true if there's an active task in the chain, false otherwise
+   */
+  async hasActiveTaskInChain(chainId: string): Promise<boolean> {
+    try {
+      // Use SCAN to find tasks with matching chainId and active status
+      const activeStatusKey = this.getStatusKey(TaskStatus.ACTIVE);
+      const activeTaskIds = await this.client.smembers(activeStatusKey);
+
+      for (const taskId of activeTaskIds) {
+        const taskKey = this.getTaskKey(taskId);
+        const task = await this.client.hgetall(taskKey);
+
+        if (task && task.chainId === chainId) {
+          return true;
+        }
+      }
+
+      return false;
+    } catch (error) {
+      this.logger.error(
+        `Error checking for active tasks in chain ${chainId}: ${error.message}`,
+        error.stack,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get the next task to execute in a chain (lowest chainOrder that is idle)
+   * @param chainId The unique chain identifier
+   * @returns The next task to execute or null if no idle tasks in chain
+   */
+  async getNextTaskInChain(chainId: string): Promise<ITask | null> {
+    try {
+      // Get all idle tasks and filter by chainId
+      const idleStatusKey = this.getStatusKey(TaskStatus.IDLE);
+      const idleTaskIds = await this.client.smembers(idleStatusKey);
+
+      const chainTasks: { task: ITask; chainOrder: number }[] = [];
+
+      for (const taskId of idleTaskIds) {
+        const taskKey = this.getTaskKey(taskId);
+        const taskData = await this.client.hgetall(taskKey);
+
+        if (taskData && taskData.chainId === chainId) {
+          const task = this.deserializeTask(taskData);
+          const chainOrder = task.chainOrder || 0;
+          chainTasks.push({ task, chainOrder });
+        }
+      }
+
+      if (chainTasks.length === 0) {
+        return null;
+      }
+
+      // Sort by chainOrder and return the first one
+      chainTasks.sort((a, b) => a.chainOrder - b.chainOrder);
+      return chainTasks[0].task;
+    } catch (error) {
+      this.logger.error(
+        `Error getting next task in chain ${chainId}: ${error.message}`,
+        error.stack,
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Find tasks by chain ID ordered by chain order
+   * @param chainId The unique chain identifier
+   * @param status Optional status filter
+   * @returns Array of tasks in the chain sorted by chainOrder
+   */
+  async findTasksByChainId(
+    chainId: string,
+    status?: TaskStatus,
+  ): Promise<ITask[]> {
+    try {
+      let taskIds: string[] = [];
+
+      if (status) {
+        // Get tasks with specific status
+        const statusKey = this.getStatusKey(status);
+        taskIds = await this.client.smembers(statusKey);
+      } else {
+        // Get all tasks by scanning all status keys
+        const allStatuses = [
+          TaskStatus.IDLE,
+          TaskStatus.ACTIVE,
+          TaskStatus.COMPLETED,
+          TaskStatus.FAILED,
+        ];
+
+        for (const taskStatus of allStatuses) {
+          const statusKey = this.getStatusKey(taskStatus);
+          const statusTaskIds = await this.client.smembers(statusKey);
+          taskIds.push(...statusTaskIds);
+        }
+      }
+
+      const chainTasks: { task: ITask; chainOrder: number }[] = [];
+
+      for (const taskId of taskIds) {
+        const taskKey = this.getTaskKey(taskId);
+        const taskData = await this.client.hgetall(taskKey);
+
+        if (taskData && taskData.chainId === chainId) {
+          const task = this.deserializeTask(taskData);
+          const chainOrder = task.chainOrder || 0;
+          chainTasks.push({ task, chainOrder });
+        }
+      }
+
+      // Sort by chainOrder and return tasks
+      chainTasks.sort((a, b) => a.chainOrder - b.chainOrder);
+      return chainTasks.map((item) => item.task);
+    } catch (error) {
+      this.logger.error(
+        `Error finding tasks in chain ${chainId}: ${error.message}`,
+        error.stack,
+      );
+      throw error;
     }
   }
 }

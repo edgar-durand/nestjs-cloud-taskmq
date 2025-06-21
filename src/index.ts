@@ -23,6 +23,7 @@ export {
   TaskStatus,
   AddTaskOptions,
   AddTaskResult,
+  ChainOptions,
 } from './interfaces/task.interface';
 
 // Models
@@ -32,10 +33,10 @@ export { CloudTask } from './models/cloud-task.model';
 export { Processor, ProcessorOptions } from './decorators/processor.decorator';
 export { Process, ProcessOptions } from './decorators/process.decorator';
 export {
-  OnQueueActive,
-  OnQueueCompleted,
-  OnQueueFailed,
-  OnQueueProgress,
+  OnTaskActive,
+  OnTaskCompleted,
+  OnTaskFailed,
+  OnTaskProgress,
 } from './decorators/events.decorator';
 export {
   CloudTaskConsumer,

@@ -1,12 +1,12 @@
 import {
-  ON_QUEUE_ACTIVE_KEY,
-  ON_QUEUE_COMPLETED_KEY,
-  ON_QUEUE_FAILED_KEY,
-  ON_QUEUE_PROGRESS_KEY,
-  OnQueueActive,
-  OnQueueCompleted,
-  OnQueueFailed,
-  OnQueueProgress,
+  ON_TASK_ACTIVE_KEY,
+  ON_TASK_COMPLETED_KEY,
+  ON_TASK_FAILED_KEY,
+  ON_TASK_PROGRESS_KEY,
+  OnTaskActive,
+  OnTaskCompleted,
+  OnTaskFailed,
+  OnTaskProgress,
 } from '../events.decorator';
 
 describe('Events Decorators', () => {
@@ -17,7 +17,7 @@ describe('Events Decorators', () => {
 
       // Create a test class with the decorated method
       class TestProcessor {
-        @OnQueueActive()
+        @OnTaskActive()
         onTaskActive() {
           return 'task active';
         }
@@ -25,7 +25,7 @@ describe('Events Decorators', () => {
 
       // Act
       const metadata = Reflect.getMetadata(
-        ON_QUEUE_ACTIVE_KEY,
+        ON_TASK_ACTIVE_KEY,
         TestProcessor.prototype[mockMethodName],
       );
 
@@ -41,7 +41,7 @@ describe('Events Decorators', () => {
 
       // Create a test class with the decorated method
       class TestProcessor {
-        @OnQueueCompleted()
+        @OnTaskCompleted()
         onTaskCompleted() {
           return 'task completed';
         }
@@ -49,7 +49,7 @@ describe('Events Decorators', () => {
 
       // Act
       const metadata = Reflect.getMetadata(
-        ON_QUEUE_COMPLETED_KEY,
+        ON_TASK_COMPLETED_KEY,
         TestProcessor.prototype[mockMethodName],
       );
 
@@ -65,7 +65,7 @@ describe('Events Decorators', () => {
 
       // Create a test class with the decorated method
       class TestProcessor {
-        @OnQueueFailed()
+        @OnTaskFailed()
         onTaskFailed() {
           return 'task failed';
         }
@@ -73,7 +73,7 @@ describe('Events Decorators', () => {
 
       // Act
       const metadata = Reflect.getMetadata(
-        ON_QUEUE_FAILED_KEY,
+        ON_TASK_FAILED_KEY,
         TestProcessor.prototype[mockMethodName],
       );
 
@@ -89,7 +89,7 @@ describe('Events Decorators', () => {
 
       // Create a test class with the decorated method
       class TestProcessor {
-        @OnQueueProgress()
+        @OnTaskProgress()
         onTaskProgress() {
           return 'task progress';
         }
@@ -97,7 +97,7 @@ describe('Events Decorators', () => {
 
       // Act
       const metadata = Reflect.getMetadata(
-        ON_QUEUE_PROGRESS_KEY,
+        ON_TASK_PROGRESS_KEY,
         TestProcessor.prototype[mockMethodName],
       );
 
@@ -110,22 +110,22 @@ describe('Events Decorators', () => {
     it('should support multiple event decorators in the same class', () => {
       // Arrange
       class TestProcessor {
-        @OnQueueActive()
+        @OnTaskActive()
         onTaskActive() {
           return 'task active';
         }
 
-        @OnQueueCompleted()
+        @OnTaskCompleted()
         onTaskCompleted() {
           return 'task completed';
         }
 
-        @OnQueueFailed()
+        @OnTaskFailed()
         onTaskFailed() {
           return 'task failed';
         }
 
-        @OnQueueProgress()
+        @OnTaskProgress()
         onTaskProgress() {
           return 'task progress';
         }
@@ -133,22 +133,22 @@ describe('Events Decorators', () => {
 
       // Act & Assert
       const activeMetadata = Reflect.getMetadata(
-        ON_QUEUE_ACTIVE_KEY,
+        ON_TASK_ACTIVE_KEY,
         TestProcessor.prototype['onTaskActive'],
       );
 
       const completedMetadata = Reflect.getMetadata(
-        ON_QUEUE_COMPLETED_KEY,
+        ON_TASK_COMPLETED_KEY,
         TestProcessor.prototype['onTaskCompleted'],
       );
 
       const failedMetadata = Reflect.getMetadata(
-        ON_QUEUE_FAILED_KEY,
+        ON_TASK_FAILED_KEY,
         TestProcessor.prototype['onTaskFailed'],
       );
 
       const progressMetadata = Reflect.getMetadata(
-        ON_QUEUE_PROGRESS_KEY,
+        ON_TASK_PROGRESS_KEY,
         TestProcessor.prototype['onTaskProgress'],
       );
 
@@ -164,7 +164,7 @@ describe('Events Decorators', () => {
       const otherMetadataValue = 'other-value';
 
       class TestProcessor {
-        @OnQueueCompleted()
+        @OnTaskCompleted()
         onTaskCompleted() {
           return 'task completed';
         }
@@ -180,7 +180,7 @@ describe('Events Decorators', () => {
 
       // Act & Assert
       const completedMetadata = Reflect.getMetadata(
-        ON_QUEUE_COMPLETED_KEY,
+        ON_TASK_COMPLETED_KEY,
         TestProcessor.prototype['onTaskCompleted'],
       );
 

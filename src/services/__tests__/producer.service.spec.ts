@@ -108,6 +108,8 @@ describe('ProducerService', () => {
           queueName,
           payload,
           status: TaskStatus.IDLE,
+          chainId: undefined,
+          chainOrder: undefined,
         }),
       );
     });
@@ -137,7 +139,9 @@ describe('ProducerService', () => {
           taskId: options.taskId,
           queueName,
           payload,
-          status: TaskStatus.IDLE,
+          status: TaskStatus.ACTIVE, // Changed to ACTIVE because scheduleTime is set
+          chainId: undefined,
+          chainOrder: undefined,
           metadata: expect.objectContaining(options.metadata),
         }),
       );

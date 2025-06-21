@@ -7,6 +7,7 @@ CloudTaskMQ is a NestJS library that provides a queue system similar to BullMQ b
 - **Google Cloud Tasks Integration**: Utilize GCP's managed queue service for task scheduling and delivery
 - **State Tracking**: Persistent storage of task states (idle, active, completed, failed) using MongoDB, Redis, or in-memory storage
 - **Storage Agnostic**: Switch between storage providers without changing your application code
+- **Task Chaining**: Sequential task execution with automatic chain progression and proper ordering
 - **Rate Limiting**: Built-in persistent rate limiting to control task processing throughput
 - **Automatic Queue Creation**: Optionally create missing queues in GCP Cloud Tasks
 - **Task Retries**: Configure retry attempts for failed tasks with customizable backoff
@@ -259,17 +260,17 @@ export class EmailProcessor {
     return { success: true, sentAt: new Date() };
     }
     
-    @OnQueueActive()
+    @OnTaskActive()
     onActive(task: CloudTask<EmailTaskPayload>): void {
     console.log(`Processing email task ${task.taskId} for user ${task.payload.userId}`);
     }
     
-    @OnQueueCompleted()
+    @OnTaskCompleted()
     onCompleted(task: CloudTask<EmailTaskPayload>, result: any): void {
     console.log(`Email task ${task.taskId} completed with result:`, result);
     }
     
-    @OnQueueFailed()
+    @OnTaskFailed()
     onFailed(task: CloudTask<EmailTaskPayload>, error: Error): void {
     console.error(`Email task ${task.taskId} failed with error:`, error.message);
     // You might want to notify someone or log to a monitoring system
@@ -278,12 +279,11 @@ export class EmailProcessor {
     /**
      * Called when progress is reported
      */
-    @OnQueueProgress()
+    @OnTaskProgress()
     onTaskProgress(task: CloudTask<TestTaskPayload>, progress: number): void {
         console.log(`Task ${task.taskId} progress: ${progress}%`);
     }
 }
-```
 
 ### Setting up the consumer endpoint
 
@@ -312,7 +312,6 @@ export class TasksController {
     return { received: true };
   }
 }
-```
 
 ## Storage Adapters
 
@@ -328,7 +327,7 @@ CloudTaskMQModule.forRoot({
     mongoUri: 'mongodb://localhost:27017/my-database',
     collectionName: 'cloud_tasks', // Optional, defaults to 'cloud_taskmq_tasks'
   },
-}),
+})
 ```
 
 ### Redis Adapter
@@ -467,8 +466,28 @@ export class CustomStorageAdapter implements IStateStorageAdapter {
     // Logic to remove a uniqueness key
     console.log('Removing uniqueness key:', key);
   }
+
+  async hasActiveTaskInChain(chainId: string): Promise<boolean> {
+    // Logic to check if there are any active tasks in the specified chain
+    // Return true if there are active tasks, false otherwise
+    console.log('Checking for active tasks in chain:', chainId);
+    return false; // Replace with actual implementation
+  }
+
+  async getNextTaskInChain(chainId: string): Promise<ITask | null> {
+    // Logic to get the next task to be executed in the chain
+    // Should return the IDLE task with the lowest chainOrder in the specified chain
+    console.log('Getting next task in chain:', chainId);
+    return null; // Replace with actual implementation
+  }
+
+  async findTasksByChainId(chainId: string, status?: TaskStatus): Promise<ITask[]> {
+    // Logic to find all tasks in a chain, optionally filtered by status
+    // Used for chain management and monitoring
+    console.log('Finding tasks by chain ID:', chainId, 'with status:', status);
+    return []; // Replace with actual implementation
+  }
 }
-```
 
 ### Integrating Your Custom Storage Adapter
 
@@ -498,8 +517,8 @@ import { CustomStorageAdapter } from './your-path-to-adapter/custom-storage.adap
 
       queues: [
         {
-          name: 'email-queue',
-          path: 'projects/your-gcp-project-id/locations/your-gcp-location/queues/email-queue',
+          name: 'email-queue', // Name used in your code
+          path: 'projects/your-gcp-project-id/locations/your-gcp-location/queues/email-queue', // Full path in GCP
           // processorUrl: 'https://your-app-url.com/tasks/email', // Optional: Specific URL for this queue
         },
         // ... add more queue configurations
@@ -548,7 +567,7 @@ import { CustomStorageAdapter } from './custom-storage/custom-storage.adapter';
           // location: configService.get('GCP_LOCATION'),     // Example: from ConfigService
           projectId: 'your-gcp-project-id',
           location: 'your-gcp-location',
-          queues: [ /* ... your queue configurations ... */ ],
+          queues: [/* queue config */],
 
           storageAdapter: 'custom',
           customStorageAdapterInstance: customAdapter,
@@ -668,64 +687,160 @@ CloudTaskMQModule.forRoot({
 })
 ```
 
-## Configuration Reference
+## Task Chaining
 
-### CloudTaskMQConfig
+CloudTaskMQ supports sequential task execution through the task chaining feature. Tasks in a chain are executed one at a time in the specified order, ensuring proper sequence and data flow between related tasks.
 
-| Property | Type | Description |
-|----------|------|-------------|
-| projectId | string | GCP project ID |
-| location | string | GCP location (e.g., 'us-central1') |
-| defaultProcessorUrl | string | URL where Cloud Tasks will send task requests |
-| queues | QueueConfig[] | Array of queue configurations |
-| storageAdapter | string | Storage adapter to use ('mongo' or 'redis') |
-| storageOptions | object | Options specific to the chosen storage adapter |
-| lockDurationMs | number | How long to lock tasks when processing (default: 60000ms) |
+### Basic Chaining
 
-### QueueConfig
-
-| Property | Type | Description |
-|----------|------|-------------|
-| name | string | Name of the queue (used in code references) |
-| path | string | Full path to the queue in GCP |
-| serviceAccountEmail | string | Service account email for OIDC token generation |
-| processorUrl | string | Optional custom URL for this specific queue |
-
-## Advanced Usage
-
-### Task Progress Tracking
+To create a chain of tasks, use the `chainOptions` parameter when adding tasks:
 
 ```typescript
-@Processor('video-queue')
-export class VideoProcessor {
-  @Process()
-  async processVideo(task: CloudTask<VideoTaskData>): Promise<any> {
-    // Report progress at various stages
-    await task.reportProgress(10); // Starting
-    
-    // Process video...
-    await task.reportProgress(50); // Half-way
-    
-    // Finish processing...
-    await task.reportProgress(100); // Complete
-    
-    return { videoUrl: 'https://example.com/processed-video.mp4' };
-  }
-  
-  @OnQueueProgress()
-  onProgress(task: CloudTask, progress: number): void {
-    console.log(`Video task ${task.taskId} is ${progress}% complete`);
-    // You could update a real-time dashboard here
+import { ProducerService } from 'nestjs-cloud-taskmq';
+
+@Injectable()
+export class OrderService {
+  constructor(private readonly producerService: ProducerService) {}
+
+  async processOrderWorkflow(orderId: string): Promise<void> {
+    const chainId = `order-${orderId}`;
+
+    // Step 1: Validate payment
+    await this.producerService.addTask('payment-queue', 
+      { orderId, action: 'validate' },
+      { chainOptions: { chainId, chainOrder: 1 } }
+    );
+
+    // Step 2: Process inventory
+    await this.producerService.addTask('inventory-queue',
+      { orderId, action: 'reserve' },
+      { chainOptions: { chainId, chainOrder: 2 } }
+    );
+
+    // Step 3: Send confirmation email
+    await this.producerService.addTask('email-queue',
+      { orderId, action: 'send-confirmation' },
+      { chainOptions: { chainId, chainOrder: 3 } }
+    );
   }
 }
 ```
+
+### Chain Execution Flow
+
+1. **Task Creation**: All chain tasks start with `IDLE` status regardless of chain state
+2. **Polling Discovery**: The polling mechanism discovers `IDLE` tasks and filters them for chain eligibility
+3. **Chain Filtering**: Only one task per chain can be `ACTIVE` at a time; the system selects the next task based on `chainOrder`
+4. **Task Execution**: The selected task is sent to GCP Cloud Tasks and marked as `ACTIVE`
+5. **Chain Progression**: When a task completes or fails, the next task in the chain is automatically activated
+
+### Chain Management
+
+You can monitor and manage chains using the producer service:
+
+```typescript
+@Injectable()
+export class OrderService {
+  constructor(private readonly producerService: ProducerService) {}
+
+  async getChainStatus(chainId: string): Promise<ITask[]> {
+    // Get all tasks in a chain
+    return await this.producerService.getChainTasks(chainId);
+  }
+
+  async getActiveChainTasks(chainId: string): Promise<ITask[]> {
+    // Get only active tasks in a chain
+    return await this.producerService.getChainTasks(chainId, TaskStatus.ACTIVE);
+  }
+}
+```
+
+### Chain Task Processing
+
+Chain tasks are processed the same way as regular tasks. The chaining logic is handled automatically:
+
+```typescript
+@Consumer('payment-queue')
+export class PaymentProcessor {
+  @Process()
+  async processPayment(task: CloudTask<{ orderId: string; action: string }>): Promise<any> {
+    const { orderId, action } = task.data;
+    
+    if (action === 'validate') {
+      // Validate payment logic
+      const isValid = await this.validatePayment(orderId);
+      
+      if (!isValid) {
+        throw new Error('Payment validation failed');
+      }
+      
+      return { status: 'validated', orderId };
+    }
+  }
+
+  @OnTaskCompleted()
+  onCompleted(task: CloudTask, result: any): void {
+    console.log(`Payment task completed for order ${task.data.orderId}`);
+    // Next task in chain will be automatically activated
+  }
+
+  @OnTaskFailed()
+  onFailed(task: CloudTask, error: Error): void {
+    console.log(`Payment task failed for order ${task.data.orderId}:`, error.message);
+    // Next task in chain will still be activated
+  }
+}
+```
+
+### Chain Behavior with Rate Limiting
+
+When a chain task is rate-limited, it gets special handling:
+
+- **Rate-limited chain tasks** with `scheduleTime` are sent directly to GCP, bypassing normal chain ordering
+- This ensures rate-limited retries work correctly without getting stuck
+- A warning is logged when `chainOptions` and `scheduleTime` are combined
+
+⚠️ **Important**: Combining `chainOptions` with `scheduleTime` breaks the sequential execution guarantee and should only be used for rate-limited retries.
+
+### Best Practices
+
+1. **Unique Chain IDs**: Use meaningful, unique identifiers for chains (e.g., `order-${orderId}`, `user-onboarding-${userId}`)
+
+2. **Sequential Order Numbers**: Use incremental integers for `chainOrder` (1, 2, 3, etc.)
+
+3. **Error Handling**: Design your chain to handle failures gracefully:
+   ```typescript
+   @OnTaskFailed()
+   onFailed(task: CloudTask, error: Error): void {
+     if (task.chainId) {
+       // Log chain failure
+       console.log(`Chain ${task.chainId} failed at step ${task.chainOrder}`);
+       
+       // Next task will still be processed - implement your retry logic
+       if (this.shouldRetryChain(error)) {
+         // Custom retry logic
+       }
+     }
+   }
+   ```
+
+4. **Chain Monitoring**: Implement monitoring for long-running chains:
+   ```typescript
+   async monitorChainProgress(chainId: string): Promise<void> {
+     const tasks = await this.producerService.getChainTasks(chainId);
+     const completed = tasks.filter(t => t.status === TaskStatus.COMPLETED).length;
+     const total = tasks.length;
+     
+     console.log(`Chain ${chainId} progress: ${completed}/${total}`);
+   }
+   ```
 
 ### Error Handling
 
 CloudTaskMQ integrates with Cloud Tasks' retry mechanism. When a task throws an error:
 
 1. The task is marked as FAILED in the storage
-2. The @OnQueueFailed handler is called (if defined)
+2. The @OnTaskFailed handler is called (if defined)
 3. The error is logged
 4. Cloud Tasks will handle retries according to your queue's retry configuration
 
@@ -772,3 +887,107 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## License
 
 This project is licensed under the MIT License.
+
+## Configuration Reference
+
+### CloudTaskMQConfig
+
+| Property | Type | Description |
+|----------|------|-------------|
+| projectId | string | GCP project ID |
+| location | string | GCP location (e.g., 'us-central1') |
+| defaultProcessorUrl | string | URL where Cloud Tasks will send task requests |
+| queues | QueueConfig[] | Array of queue configurations |
+| storageAdapter | string | Storage adapter to use ('mongo' or 'redis') |
+| storageOptions | object | Options specific to the chosen storage adapter |
+| lockDurationMs | number | How long to lock tasks when processing (default: 60000ms) |
+
+### QueueConfig
+
+| Property | Type | Description |
+|----------|------|-------------|
+| name | string | Name of the queue (used in code references) |
+| path | string | Full path to the queue in GCP |
+| serviceAccountEmail | string | Service account email for OIDC token generation |
+| processorUrl | string | Optional custom URL for this specific queue |
+
+### Environment Variables
+
+CloudTaskMQ supports several environment variables for advanced configuration:
+
+| Variable | Description | Default | Use Case |
+|----------|-------------|---------|----------|
+| `CTMQ_IS_CHILD_INSTANCE` | Set to `'true'` to disable task polling/pulling in microservice instances | `false` | Useful in monorepos with microservice architecture where you want to prevent specific services from pulling tasks to avoid duplicity |
+
+#### CTMQ_IS_CHILD_INSTANCE Usage
+
+In monorepo architectures with multiple microservices, you might want to designate certain instances as "child" instances that don't pull tasks from the queue to avoid duplicate processing:
+
+```typescript
+// In your microservice that should NOT pull tasks
+process.env.CTMQ_IS_CHILD_INSTANCE = 'true';
+
+// Or set it in your deployment environment
+// Docker: ENV CTMQ_IS_CHILD_INSTANCE=true
+// Kubernetes: - name: CTMQ_IS_CHILD_INSTANCE value: "true"
+```
+
+**Example Scenario:**
+- **Gateway Service**: Processes all tasks (`CTMQ_IS_CHILD_INSTANCE=false` or not set)
+- **Auth Service**: Only produces tasks, doesn't process them (`CTMQ_IS_CHILD_INSTANCE=true`)  
+- **Notification Service**: Only produces tasks, doesn't process them (`CTMQ_IS_CHILD_INSTANCE=true`)
+
+This prevents multiple services from competing for the same tasks and ensures centralized task processing.
+
+## Advanced Usage
+
+### Task Progress Tracking
+
+```typescript
+@Processor('video-queue')
+export class VideoProcessor {
+  @Process()
+  async processVideo(task: CloudTask<VideoTaskData>): Promise<any> {
+    // Report progress at various stages
+    await task.reportProgress(10); // Starting
+    
+    // Process video...
+    await task.reportProgress(50); // Half-way
+    
+    // Finish processing...
+    await task.reportProgress(100); // Complete
+    
+    return { videoUrl: 'https://example.com/processed-video.mp4' };
+  }
+  
+  @OnTaskProgress()
+  onProgress(task: CloudTask, progress: number): void {
+    console.log(`Video task ${task.taskId} is ${progress}% complete`);
+    // You could update a real-time dashboard here
+  }
+}
+```
+
+### Error Handling
+
+CloudTaskMQ integrates with Cloud Tasks' retry mechanism. When a task throws an error:
+
+1. The task is marked as FAILED in the storage
+2. The @OnTaskFailed handler is called (if defined)
+3. The error is logged
+4. Cloud Tasks will handle retries according to your queue's retry configuration
+
+```typescript
+@Process()
+async processTask(task: CloudTask): Promise<any> {
+  try {
+    // Your processing logic
+    return result;
+  } catch (error) {
+    // You can add custom error handling here
+    console.error('Custom error handling:', error);
+    
+    // Then rethrow to let CloudTaskMQ handle the failure
+    throw error;
+  }
+}

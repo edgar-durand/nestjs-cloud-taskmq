@@ -4,9 +4,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   CloudTask,
-  OnQueueActive,
-  OnQueueCompleted,
-  OnQueueFailed,
+  OnTaskActive,
+  OnTaskCompleted,
+  OnTaskFailed,
   Process,
   Processor,
 } from '../src';
@@ -71,7 +71,7 @@ export class EmailProcessor {
   /**
    * Called when the task starts processing
    */
-  @OnQueueActive()
+  @OnTaskActive()
   onActive(task: CloudTask<EmailData>): void {
     this.logger.log(`Starting to process email to: ${task.payload.to}`);
 
@@ -81,7 +81,7 @@ export class EmailProcessor {
   /**
    * Called when the task completes successfully
    */
-  @OnQueueCompleted()
+  @OnTaskCompleted()
   onCompleted(task: CloudTask<EmailData>, result: any): void {
     this.logger.log(
       `Successfully sent email to ${task.payload.to}, message ID: ${result.messageId}`,
@@ -93,7 +93,7 @@ export class EmailProcessor {
   /**
    * Called when the task fails with an error
    */
-  @OnQueueFailed()
+  @OnTaskFailed()
   onFailed(task: CloudTask<EmailData>, error: Error): void {
     this.logger.error(
       `Failed to send email to ${task.payload.to}: ${error.message}`,
